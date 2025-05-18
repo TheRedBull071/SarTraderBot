@@ -4,6 +4,10 @@ FROM python:3.10-slim
 # Set working directory
 WORKDIR /app
 
+# Set timezone to Asia/Tehran
+ENV TZ=Asia/Tehran
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
 # Install system dependencies for Chrome and Chromedriver
 RUN apt-get update && apt-get install -y \
     wget \
