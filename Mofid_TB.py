@@ -49,6 +49,7 @@ from typing import List
 import mysql.connector
 from mysql.connector import Error
 from mysql.connector import pooling
+from datetime import datetime
 
 
 logger = getLogger(__name__)
@@ -336,15 +337,28 @@ def is_brokerage_username_in_use(brokerage_username_to_check: str, brokerage_typ
             cursor.close()
             connection.close()
 
+
+
 def is_subscription_active(user):
     if not user or "expiry_date" not in user or not user["expiry_date"]:
+        print(f"User {user.get('telegram_id')} has no expiry_date or it's empty")
         return False
     try:
-        if not user["expiry_date"]: return False
-        expiry_date = datetime.strptime(user["expiry_date"], "%Y-%m-%d %H:%M:%S")
-        return datetime.now() < expiry_date
-    except (ValueError, TypeError) as e:
-        logger.error(f"Error checking subscription for user {user.get('telegram_id')}: {e}")
+        expiry_date = user["expiry_date"]
+        # اگر expiry_date یک رشته باشد، آن را به datetime تبدیل کن
+        if isinstance(expiry_date, str):
+            expiry_date = datetime.strptime(expiry_date, "%Y-%m-%d %H:%M:%S")
+        # اگر expiry_date یک شیء datetime باشد، نیازی به تبدیل نیست
+        elif isinstance(expiry_date, datetime):
+            pass
+        else:
+            raise TypeError(f"Invalid type for expiry_date: {type(expiry_date)}")
+        
+        now = datetime.now()
+        print(f"Current time: {now}, Expiry date: {expiry_date}")
+        return now < expiry_date
+    except Exception as e:
+        print(f"Error checking subscription for user {user.get('telegram_id')}: {e}")
         return False
 
 def get_time_remaining(user):
