@@ -367,18 +367,7 @@ def get_time_remaining(user):
     except Exception:
         return "نامشخص"
 
-def get_time_remaining(user):
-    if not user or "expiry_date" not in user or not user["expiry_date"]: return "نامشخص"
-    try:
-        if not user["expiry_date"]: return "منقضی شده"
-        expiry_date = datetime.strptime(user["expiry_date"], "%Y-%m-%d %H:%M:%S")
-        time_left = expiry_date - datetime.now()
-        if time_left.total_seconds() <= 0: return "منقضی شده"
-        days = time_left.days
-        hours, rem = divmod(time_left.seconds, 3600)
-        minutes, _ = divmod(rem, 60)
-        return f"{days} روز، {hours} ساعت، {minutes} دقیقه"
-    except (ValueError, TypeError): return "نامشخص"
+
 
 def validate_premium_token(token_string, telegram_id, brokerage_username_for_validation):
     connection = get_db_connection()
