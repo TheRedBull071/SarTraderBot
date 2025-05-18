@@ -57,10 +57,12 @@ logging.basicConfig(
 
 
 # Define conversation states
-# Define conversation states
 (
     MAIN_MENU,
-    BROKER_SELECTION,
+    BROKER_SELECTION, # Will be simplified for Mofid-only bot
+    # LOGIN_USERNAME, # Implicit
+    # LOGIN_PASSWORD, # Implicit, combined into LOGIN_ENTER_BROKERAGE_PASSWORD
+    # LOGIN_CAPTCHA, # Removed for Mofid
     STOCK_SELECTION,
     ORDER_ACTION,
     ORDER_PRICE_TYPE,
@@ -74,22 +76,17 @@ logging.basicConfig(
     REGISTER_PROMPT,
     REGISTER_FULL_NAME,
     REGISTER_BROKERAGE_USERNAME,
-    REGISTER_BROKERAGE_TYPE,
+    REGISTER_BROKERAGE_TYPE, # Will default/confirm Mofid
     REGISTER_HAS_TOKEN,
     REGISTER_TOKEN_INPUT,
     LOGIN_CONFIRM_DETAILS,
-    LOGIN_ENTER_BROKERAGE_PASSWORD,
+    LOGIN_ENTER_BROKERAGE_PASSWORD, # Key state for Mofid login
+    # LOGIN_ENTER_TOKEN, # This was for Agah premium, Mofid will use password
     EXPIRED_ACCOUNT_OPTIONS,
     LOGIN_ENTER_NEW_TOKEN_FOR_EXPIRED,
-    ATTEMPT_MOFID_LOGIN,
+    ATTEMPT_MOFID_LOGIN, # New state for actual login attempt
     AWAITING_NEW_BROKERAGE_USERNAME,
-    ADMIN_LOGIN,              # New: Admin password entry
-    ADMIN_MAIN_MENU,          # New: Admin main menu
-    ADMIN_USER_SEARCH,        # New: User search input
-    ADMIN_USER_EDIT,          # New: Editing a user
-    ADMIN_TOKEN_LIST,         # New: Viewing tokens
-    ADMIN_TOKEN_GENERATE,     # New: Generating a new token
-) = range(30)  # Updated range to include new states
+) = range(24) # Adjusted range
 
 
 EMOJI = {
@@ -110,536 +107,8 @@ LOGIN_ATTEMPT_WINDOW_MINUTES = 10
 LOGIN_COOLDOWN_MINUTES = 15
 MIN_SECONDS_BETWEEN_ORDERS = 10 # This can be adjusted based on Mofid's behavior
 
-#admin panel
-# Admin Panel Configuration
-ADMIN_PASSWORD = "0000"  # Change this in production!
-ADMIN_SESSIONS = {}  # Store active admin sessions: {telegram_id: expiry_time}
-ADMIN_SESSION_TIMEOUT_MINUTES = 30  # Admin session expires after 30 minutes
 
 
-import uuid
-from datetime import datetime, timedelta
-
-def generate_token_entry(telegram_id: str = None, subscription_type: str = "ماهانه", expiry_date_str: str = None, brokerage_username: str = None) -> dict:
-    """Generate a new token entry with specified details."""
-    # Generate a unique token
-    token = str(uuid.uuid4())[:8].upper()  # 8-character unique token
-
-    # Set expiry date (default to 90 days if not provided)
-    if expiry_date_str:
-        try:
-            expiry_date = datetime.strptime(expiry_date_str, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            expiry_date = datetime.now() + timedelta(days=90)
-    else:
-        expiry_date = datetime.now() + timedelta(days=90)
-
-    # Create token entry
-    token_entry = {
-        "token": token,
-        "telegram_id": telegram_id,
-        "brokerage_username": brokerage_username,
-        "subscription_type": subscription_type,
-        "expiry_date": expiry_date.strftime("%Y-%m-%d %H:%M:%S"),
-        "is_used": False,
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    return token_entry
-
-
-def is_admin_session_active(telegram_id: int) -> bool:
-    """Check if the user has an active admin session."""
-    if telegram_id in ADMIN_SESSIONS:
-        expiry_time = ADMIN_SESSIONS[telegram_id]
-        if datetime.now() < expiry_time:
-            return True
-        else:
-            del ADMIN_SESSIONS[telegram_id]  # Remove expired session
-    return False
-
-def start_admin_session(telegram_id: int):
-    """Start an admin session for the user."""
-    ADMIN_SESSIONS[telegram_id] = datetime.now() + timedelta(minutes=ADMIN_SESSION_TIMEOUT_MINUTES)
-    logger.info(f"Admin session started for Telegram ID {telegram_id}")
-
-def end_admin_session(telegram_id: int):
-    """End the admin session for the user."""
-    if telegram_id in ADMIN_SESSIONS:
-        del ADMIN_SESSIONS[telegram_id]
-        logger.info(f"Admin session ended for Telegram ID {telegram_id}")
-
-def format_user_info(user: dict) -> str:
-    """Format user information for display."""
-    expiry_date = user.get("expiry_date", "نامشخص")
-    time_left = get_time_remaining(user)
-    return (
-        f"🆔 ID تلگرام: `{user.get('telegram_id', 'نامشخص')}`\n"
-        f"👤 نام: {user.get('full_name', 'نامشخص')}\n"
-        f"🏦 نام کاربری کارگزاری: {user.get('brokerage_username', 'نامشخص')}\n"
-        f"📍 نوع کارگزاری: {user.get('brokerage_type', 'نامشخص')}\n"
-        f"💎 نوع اشتراک: {user.get('subscription_type', 'نامشخص')}\n"
-        f"📅 تاریخ انقضا: {expiry_date} ({time_left})"
-    )
-
-def format_token_info(token: dict) -> str:
-    """Format token information for display."""
-    return (
-        f"🔑 توکن: `{token.get('token', 'نامشخص')}`\n"
-        f"🆔 ID تلگرام: {token.get('telegram_id', 'همه') or 'همه'}\n"
-        f"🏦 نام کاربری کارگزاری: {token.get('brokerage_username', 'همه') or 'همه'}\n"
-        f"💎 نوع اشتراک: {token.get('subscription_type', 'نامشخص')}\n"
-        f"📅 انقضای توکن: {token.get('expiry_date', 'نامشخص')}\n"
-        f"✅ استفاده شده: {'بله' if token.get('is_used', False) else 'خیر'}\n"
-        f"📆 تاریخ ایجاد: {token.get('created_at', 'نامشخص')}"
-    )
-
-def find_users_by_fields(**kwargs):
-    """Finds users matching multiple search criteria (case-insensitive)."""
-    data = load_users_data()
-    users_list = data.get("users", [])
-    if not kwargs:
-        return users_list
-    results = []
-    for user in users_list:
-        match = True
-        for field, value in kwargs.items():
-            if value:
-                user_field_value = str(user.get(field, "")).lower()
-                search_value = str(value).lower()
-                if search_value not in user_field_value:
-                    match = False
-                    break
-        if match:
-            results.append(user)
-    return results
-
-
-async def admin_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle /admin command and prompt for password."""
-    user_id = update.effective_user.id
-    session = context.user_data.get("session", MofidBrokerSession(user_id))
-    session.update_activity()
-    context.user_data["session"] = session
-    logger.info(f"Admin login attempt by Telegram ID {user_id}")
-
-    if is_admin_session_active(user_id):
-        logger.info(f"User {user_id} already has an active admin session. Redirecting to admin main menu.")
-        return await admin_main_menu(update, context)
-
-    await update.message.reply_text(f"{EMOJI['admin']} لطفاً رمز عبور ادمین را وارد کنید:")
-    logger.info(f"Prompted user {user_id} for admin password")
-    return ADMIN_LOGIN
-async def verify_admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Verify admin password and show main menu."""
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-    password = update.message.text.strip()
-
-    if password == ADMIN_PASSWORD:
-        start_admin_session(user_id)
-        session.add_log(f"ورود ادمین موفق برای ID {user_id}", "success")
-        return await admin_main_menu(update, context)
-    else:
-        session.add_log(f"تلاش ناموفق ورود ادمین برای ID {user_id}", "warning")
-        await update.message.reply_text(
-            f"{EMOJI['error']} رمز عبور نادرست است. لطفاً دوباره تلاش کنید یا با /start به منوی اصلی بازگردید."
-        )
-        return ADMIN_LOGIN
-
-async def admin_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show the admin main menu."""
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        logger.warning(f"Admin session expired or invalid for user {user_id}")
-        await update.message.reply_text(f"{EMOJI['error']} جلسه ادمین منقضی شده یا نامعتبر است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    keyboard = [
-        [InlineKeyboardButton("📊 مدیریت کاربران", callback_data="admin_manage_users")],
-        [InlineKeyboardButton("🔑 مشاهده توکن‌ها", callback_data="admin_view_tokens")],
-        [InlineKeyboardButton("🛠️ تولید توکن جدید", callback_data="admin_generate_token")],
-        [InlineKeyboardButton("💡 راهنما", callback_data="admin_help")],
-        [InlineKeyboardButton("🚪 خروج از پنل ادمین", callback_data="admin_logout")]
-    ]
-    text = f"{EMOJI['admin']} *پنل مدیریت ربات*\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:"
-    
-    logger.info(f"Displaying admin main menu for user {user_id}")
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(
-            text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-    return ADMIN_MAIN_MENU
-
-async def admin_manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Prompt for user search criteria."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        await query.edit_message_text(f"{EMOJI['error']} جلسه ادمین منقضی شده است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    await query.edit_message_text(
-        f"{EMOJI['info']} لطفاً معیارهای جستجو را وارد کنید (هر فیلد اختیاری است):\n"
-        f"فرمت: \n`ID تلگرام: <عدد>\nنام: <نام کاربر>\nنام کاربری کارگزاری: <نام کاربری>`\n"
-        f"برای نمایش همه کاربران، فقط بنویسید: `همه`",
-        parse_mode="Markdown"
-    )
-    return ADMIN_USER_SEARCH
-
-async def process_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Process user search criteria and display results."""
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        await update.message.reply_text(f"{EMOJI['error']} جلسه ادمین منقضی شده است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    search_text = update.message.text.strip()
-    search_criteria = {}
-    if search_text.lower() != "همه":
-        lines = search_text.split("\n")
-        for line in lines:
-            if "ID تلگرام:" in line:
-                search_criteria["telegram_id"] = line.split(":", 1)[1].strip()
-            elif "نام:" in line:
-                search_criteria["full_name"] = line.split(":", 1)[1].strip()
-            elif "نام کاربری کارگزاری:" in line:
-                search_criteria["brokerage_username"] = line.split(":", 1)[1].strip()
-
-    users = find_users_by_fields(**search_criteria)
-    context.user_data["admin_search_results"] = users  # Store for editing
-
-    if not users:
-        await update.message.reply_text(
-            f"{EMOJI['info']} هیچ کاربری با این معیارها یافت نشد.\n"
-            f"برای جستجوی مجدد یا نمایش همه کاربران، معیارها را وارد کنید یا 'همه' بنویسید.",
-            parse_mode="Markdown"
-        )
-        return ADMIN_USER_SEARCH
-
-    message = f"{EMOJI['report']} *نتایج جستجو ({len(users)} کاربر)*\n\n"
-    for i, user in enumerate(users, 1):
-        message += f"کاربر {i}:\n{format_user_info(user)}\n{'-'*20}\n"
-
-    keyboard = [
-        [InlineKeyboardButton("✏️ ویرایش کاربر", callback_data="admin_select_user_to_edit")],
-        [InlineKeyboardButton("🔍 جستجوی مجدد", callback_data="admin_manage_users")],
-        [InlineKeyboardButton("🔙 بازگشت به منوی ادمین", callback_data="admin_main_menu")]
-    ]
-    await update.message.reply_text(
-        text=message,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
-    return ADMIN_MAIN_MENU
-
-async def admin_select_user_to_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Prompt admin to select a user to edit."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        await query.edit_message_text(f"{EMOJI['error']} جلسه ادمین منقضی شده است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    users = context.user_data.get("admin_search_results", [])
-    if not users:
-        await query.edit_message_text(
-            f"{EMOJI['error']} هیچ کاربری برای ویرایش یافت نشد. لطفاً ابتدا جستجو کنید.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 جستجوی کاربران", callback_data="admin_manage_users")]])
-        )
-        return ADMIN_MAIN_MENU
-
-    keyboard = [
-        [InlineKeyboardButton(f"ID: {user['telegram_id']}", callback_data=f"edit_user_{user['telegram_id']}")]
-        for user in users
-    ]
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به منوی ادمین", callback_data="admin_main_menu")])
-    await query.edit_message_text(
-        text=f"{EMOJI['edit']} لطفاً کاربر مورد نظر برای ویرایش را انتخاب کنید:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
-    return ADMIN_USER_EDIT
-async def admin_edit_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle user editing process."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        await query.edit_message_text(f"{EMOJI['error']} جلسه ادمین منقضی شده است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    selected_user_id = query.data.split("_")[-1]
-    all_data = load_users_data()
-    user_to_edit = None
-    for user in all_data["users"]:
-        if str(user.get("telegram_id")) == selected_user_id:
-            user_to_edit = user
-            break
-
-    if not user_to_edit:
-        await query.edit_message_text(
-            f"{EMOJI['error']} کاربر یافت نشد.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی ادمین", callback_data="admin_main_menu")]])
-        )
-        return ADMIN_MAIN_MENU
-
-    context.user_data["admin_user_to_edit"] = user_to_edit
-    await query.edit_message_text(
-        f"{EMOJI['edit']} ویرایش کاربر: {user_to_edit.get('full_name', 'نامشخص')} (ID: {user_to_edit.get('telegram_id')})\n"
-        f"لطفاً اطلاعات جدید را وارد کنید:\n"
-        f"فرمت:\n"
-        f"نام کامل: <نام>\n"
-        f"نام کاربری کارگزاری: <نام کاربری>\n"
-        f"نوع کارگزاری: <mofid یا agah>\n"
-        f"نوع اشتراک: <free یا premium>\n"
-        f"تاریخ انقضا: <YYYY-MM-DD HH:MM:SS>\n"
-        f"توکن: <توکن یا خالی>",
-        parse_mode="Markdown"
-    )
-    return ADMIN_USER_EDIT
-
-async def process_user_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Process the new user data and save it."""
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        await update.message.reply_text(f"{EMOJI['error']} جلسه ادمین منقضی شده است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    user_to_edit = context.user_data.get("admin_user_to_edit")
-    if not user_to_edit:
-        await update.message.reply_text(
-            f"{EMOJI['error']} کاربر برای ویرایش یافت نشد.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی ادمین", callback_data="admin_main_menu")]])
-        )
-        return ADMIN_MAIN_MENU
-
-    edit_text = update.message.text.strip()
-    new_data = {}
-    lines = edit_text.split("\n")
-    for line in lines:
-        if "نام کامل:" in line:
-            new_data["full_name"] = line.split(":", 1)[1].strip()
-        elif "نام کاربری کارگزاری:" in line:
-            new_data["brokerage_username"] = line.split(":", 1)[1].strip()
-        elif "نوع کارگزاری:" in line:
-            new_data["brokerage_type"] = line.split(":", 1)[1].strip()
-        elif "نوع اشتراک:" in line:
-            new_data["subscription_type"] = line.split(":", 1)[1].strip()
-        elif "تاریخ انقضا:" in line:
-            new_data["expiry_date"] = line.split(":", 1)[1].strip()
-        elif "توکن:" in line:
-            new_data["token"] = line.split(":", 1)[1].strip() or None
-
-    all_data = load_users_data()
-    for user in all_data["users"]:
-        if str(user.get("telegram_id")) == str(user_to_edit["telegram_id"]):
-            user.update(new_data)
-            break
-
-    save_users_data(all_data)
-    session.add_log(f"کاربر با ID {user_to_edit['telegram_id']} ویرایش شد", "success")
-    await update.message.reply_text(
-        f"{EMOJI['success']} اطلاعات کاربر با موفقیت به‌روزرسانی شد.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی ادمین", callback_data="admin_main_menu")]])
-    )
-    return ADMIN_MAIN_MENU
-
-async def admin_view_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Display all tokens."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        await query.edit_message_text(f"{EMOJI['error']} جلسه ادمین منقضی شده است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    all_data = load_users_data()
-    tokens = all_data.get("tokens", [])
-    if not tokens:
-        await query.edit_message_text(
-            f"{EMOJI['info']} هیچ توکنی وجود ندارد.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی ادمین", callback_data="admin_main_menu")]])
-        )
-        return ADMIN_MAIN_MENU
-
-    message = f"{EMOJI['report']} *لیست توکن‌ها ({len(tokens)} توکن)*\n\n"
-    for i, token in enumerate(tokens, 1):
-        message += f"توکن {i}:\n{format_token_info(token)}\n{'-'*20}\n"
-
-    await query.edit_message_text(
-        text=message,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی ادمین", callback_data="admin_main_menu")]]),
-        parse_mode="Markdown"
-    )
-    return ADMIN_MAIN_MENU
-
-async def admin_generate_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Prompt for token generation details."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        await query.edit_message_text(f"{EMOJI['error']} جلسه ادمین منقضی شده است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    await query.edit_message_text(
-        f"{EMOJI['edit']} لطفاً جزئیات توکن را وارد کنید:\n"
-        f"فرمت:\n"
-        f"ID تلگرام: <عدد یا خالی>\n"
-        f"نام کاربری کارگزاری: <نام یا خالی>\n"
-        f"نوع اشتراک: <روزانه، هفتگی، ماهانه>\n"
-        f"تاریخ انقضای توکن: <YYYY-MM-DD HH:MM:SS>",
-        parse_mode="Markdown"
-    )
-    return ADMIN_TOKEN_GENERATE
-
-async def process_token_generation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Generate and save a new token."""
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        await update.message.reply_text(f"{EMOJI['error']} جلسه ادمین منقضی شده است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    token_text = update.message.text.strip()
-    token_data = {
-        "telegram_id": None,
-        "brokerage_username": None,
-        "subscription_type": "ماهانه",
-        "expiry_date": (datetime.now() + timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
-    }
-    lines = token_text.split("\n")
-    for line in lines:
-        if "ID تلگرام:" in line:
-            token_data["telegram_id"] = line.split(":", 1)[1].strip() or None
-        elif "نام کاربری کارگزاری:" in line:
-            token_data["brokerage_username"] = line.split(":", 1)[1].strip() or None
-        elif "نوع اشتراک:" in line:
-            token_data["subscription_type"] = line.split(":", 1)[1].strip()
-        elif "تاریخ انقضای توکن:" in line:
-            token_data["expiry_date"] = line.split(":", 1)[1].strip()
-
-    new_token = generate_token_entry(
-        telegram_id=token_data["telegram_id"],
-        subscription_type=token_data["subscription_type"],
-        expiry_date_str=token_data["expiry_date"],
-        brokerage_username=token_data["brokerage_username"]
-    )
-
-    all_data = load_users_data()
-    all_data["tokens"].append(new_token)
-    save_users_data(all_data)
-    session.add_log(f"توکن جدید تولید شد: {new_token['token']}", "success")
-
-    message = (
-        f"{EMOJI['success']} توکن با موفقیت تولید شد:\n"
-        f"🔑 `{new_token['token']}`\n"
-        f"نوع: {new_token['subscription_type']}\n"
-        f"انقضا: {new_token['expiry_date']}\n"
-    )
-    if new_token["telegram_id"]:
-        message += f"ID تلگرام: {new_token['telegram_id']}\n"
-    if new_token["brokerage_username"]:
-        message += f"نام کاربری کارگزاری: {new_token['brokerage_username']}\n"
-
-    await update.message.reply_text(
-        text=message,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی ادمین", callback_data="admin_main_menu")]]),
-        parse_mode="Markdown"
-    )
-    return ADMIN_MAIN_MENU
-
-async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show admin help and guidelines."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    if not is_admin_session_active(user_id):
-        await query.edit_message_text(f"{EMOJI['error']} جلسه ادمین منقضی شده است. لطفاً دوباره با /admin وارد شوید.")
-        return ConversationHandler.END
-
-    help_text = f"""
-{EMOJI['info']} *راهنمای پنل ادمین*
-
-**توضیحات:**
-- **مدیریت کاربران:** مشاهده، جستجو و ویرایش اطلاعات کاربران.
-- **توکن‌های موجود:** لیست تمام توکن‌های تولید شده و وضعیت آن‌ها.
-- **تولید توکن جدید:** ایجاد توکن‌های اشتراک.
-  - **ID تلگرام:** برای محدود کردن توکن به یک کاربر خاص.
-  - **نام کاربری کارگزاری:** برای محدود کردن توکن به یک حساب کارگزاری.
-  - **نوع اشتراک:** مدت اعتبار اشتراک (روزانه، هفتگی، ماهانه).
-  - **انقضای توکن:** تاریخ اعتبار خود توکن برای فعال‌سازی.
-
-**نکات امنیتی:**
-1. برای امنیت، توکن‌ها را با ID تلگرام و نام کاربری کارگزاری محدود کنید.
-2. توکن‌های عمومی (بدون ID یا نام کاربری) توسط اولین کاربر قابل استفاده هستند.
-3. هر توکن یک‌بار مصرف است.
-4. تاریخ انقضای توکن را بررسی کنید تا از سوءاستفاده جلوگیری شود.
-
-**جلوگیری از سوءاستفاده دوره رایگان:**
-- ثبت‌نام رایگان با یک نام کاربری کارگزاری فقط یک‌بار مجاز است.
-"""
-    await query.edit_message_text(
-        text=help_text,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی ادمین", callback_data="admin_main_menu")]]),
-        parse_mode="Markdown"
-    )
-    return ADMIN_MAIN_MENU
-
-async def admin_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Log out the admin."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    session = context.user_data["session"]
-    session.update_activity()
-
-    end_admin_session(user_id)
-    session.add_log(f"خروج ادمین برای ID {user_id}", "info")
-    await query.edit_message_text(
-        f"{EMOJI['logout']} با موفقیت از پنل ادمین خارج شدید. برای ورود دوباره از /admin استفاده کنید."
-    )
-    return ConversationHandler.END
 
 
 #railway setting user.json file
@@ -649,69 +118,54 @@ USERS_FILE = os.path.join(DATA_DIR, "user.json")
 
 # --- User Data Management (Identical to telegramBotV7.py) ---
 def load_users_data():
-    """Load user data from user.json with enhanced error handling."""
+    # ایجاد دایrektori اگر وجود نداشته باشد
     os.makedirs(DATA_DIR, exist_ok=True)
     
     if not os.path.exists(USERS_FILE):
-        logger.warning(f"Users file {USERS_FILE} does not exist. Creating new empty structure.")
-        default_data = {"users": [], "tokens": [], "activity_log": {}}
-        save_users_data(default_data)  # Create the file immediately
-        return default_data
-
+        return {"users": [], "tokens": [], "activity_log": {}}
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if not isinstance(data, dict):
-                logger.error(f"Invalid JSON structure in {USERS_FILE}. Resetting to default.")
-                return {"users": [], "tokens": [], "activity_log": {}}
-            if "users" not in data:
-                data["users"] = []
-            if "tokens" not in data:
-                data["tokens"] = []
-            if "activity_log" not in data:
-                data["activity_log"] = {}
-            logger.info(f"Successfully loaded user data from {USERS_FILE}")
+            if "users" not in data: data["users"] = []
+            if "tokens" not in data: data["tokens"] = []
+            if "activity_log" not in data: data["activity_log"] = {}
             return data
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error in {USERS_FILE}: {e}. Returning default structure.")
+    except json.JSONDecodeError:
+        logger.error(f"Error decoding JSON from {USERS_FILE}.")
         return {"users": [], "tokens": [], "activity_log": {}}
     except Exception as e:
-        logger.error(f"Unexpected error loading {USERS_FILE}: {e}")
+        logger.error(f"Error loading user data from {USERS_FILE}: {e}")
         return {"users": [], "tokens": [], "activity_log": {}}
 
 def save_users_data(data):
-    """Save user data to user.json with robust locking and error handling."""
+    # ایجاد دایrektori اگر وجود نداشته باشد
     os.makedirs(DATA_DIR, exist_ok=True)
     
     lock_file = f"{USERS_FILE}.lock"
     lock = FileLock(lock_file, timeout=10)
     max_retries = 3
     retry_delay = 2  # Seconds
-
     for attempt in range(max_retries):
         try:
             with lock:  # Acquire exclusive lock for writing
                 with open(USERS_FILE, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=4, ensure_ascii=False)
                 logger.info(f"User data successfully saved to {USERS_FILE}")
-                return
+                return  # Success, exit function
         except Timeout:
             logger.warning(f"Timeout acquiring lock for {USERS_FILE}, attempt {attempt + 1}/{max_retries}.")
             if attempt == max_retries - 1:
                 logger.error(f"Failed to acquire lock for {USERS_FILE} after {max_retries} attempts.")
-                raise Exception(f"Could not save data to {USERS_FILE} due to lock timeout.")
+                raise Exception(f"Could not acquire lock for {USERS_FILE}. Please try again later.")
             sleep(retry_delay)
-        except json.JSONEncodeError as e:
-            logger.error(f"JSON encode error saving to {USERS_FILE}: {e}")
-            raise
         except Exception as e:
-            logger.error(f"Unexpected error saving to {USERS_FILE}: {e}")
+            logger.error(f"Error saving user data to {USERS_FILE}: {e}")
             raise
         finally:
             try:
                 lock.release()
-            except Exception as e:
-                logger.warning(f"Error releasing lock for {USERS_FILE}: {e}")
+            except:
+                pass
 
 def find_user_by_telegram_id(telegram_id):
     data = load_users_data()
@@ -3027,7 +2481,8 @@ async def show_subscription_guide(update: Update, context: ContextTypes.DEFAULT_
 
 
 def main() -> None:
-    bot_token = os.environ.get("MOFID_BOT_TOKEN")
+    bot_token = os.environ.get("MOFID_BOT_TOKEN") 
+  # Use a different token for the Mofid bot
     if not bot_token:
         logger.critical("MOFID_BOT_TOKEN not found in .env file. Exiting.")
         return
@@ -3044,10 +2499,7 @@ def main() -> None:
     application = Application.builder().token(bot_token).build()
     
     conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CommandHandler("admin", admin_login)  # New entry point for admin
-        ],
+        entry_points=[CommandHandler("start", start)],
         states={
             MAIN_MENU: [
                 CallbackQueryHandler(show_tutorial_mofid, pattern="^menu_tutorial_mofid$"),
@@ -3118,26 +2570,11 @@ def main() -> None:
                 CallbackQueryHandler(handle_post_order_choice, pattern="^post_order_(new_order_mofid|logout_mofid)$"),
                 CallbackQueryHandler(back_to_quantity_from_confirm, pattern="^back_to_quantity_from_confirm$"),
             ],
-            VIEW_DETAILS: [],
+            VIEW_DETAILS: [],  # Empty since we moved handling to POST_ORDER_CHOICE
             POST_ORDER_CHOICE: [
                 CallbackQueryHandler(handle_post_order_choice, pattern="^post_order_"),
-                CallbackQueryHandler(reshow_order_details, pattern="^reshow_details$")
+                CallbackQueryHandler(reshow_order_details, pattern="^reshow_details$") 
             ],
-            ADMIN_LOGIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, verify_admin_password)],
-            ADMIN_MAIN_MENU: [
-                CallbackQueryHandler(admin_manage_users, pattern="^admin_manage_users$"),
-                CallbackQueryHandler(admin_view_tokens, pattern="^admin_view_tokens$"),
-                CallbackQueryHandler(admin_generate_token, pattern="^admin_generate_token$"),
-                CallbackQueryHandler(admin_help, pattern="^admin_help$"),
-                CallbackQueryHandler(admin_logout, pattern="^admin_logout$"),
-                CallbackQueryHandler(admin_main_menu, pattern="^admin_main_menu$"),
-                CallbackQueryHandler(admin_select_user_to_edit, pattern="^admin_select_user_to_edit$"),
-                CallbackQueryHandler(admin_edit_user, pattern="^edit_user_")
-            ],
-            ADMIN_USER_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_user_search)],
-            ADMIN_USER_EDIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_user_edit)],
-            ADMIN_TOKEN_LIST: [],  # Not used directly, handled in ADMIN_MAIN_MENU
-            ADMIN_TOKEN_GENERATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_token_generation)],
         },
         fallbacks=[
             CommandHandler("start", start),
@@ -3148,5 +2585,6 @@ def main() -> None:
     application.add_error_handler(error_handler)
     logger.info("Mofid Telegram Bot started successfully.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 if __name__ == "__main__":
     main()
