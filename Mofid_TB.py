@@ -100,19 +100,27 @@ EMOJI = {
     "confirm": "👍", "password": "🔑", "ratelimit": "🚦", "block": "🚫"
 }
 
-USERS_FILE = "users.json" # Shared user data file
+#USERS_FILE = "users.json" # Shared user data file
 
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_ATTEMPT_WINDOW_MINUTES = 10
 LOGIN_COOLDOWN_MINUTES = 15
 MIN_SECONDS_BETWEEN_ORDERS = 10 # This can be adjusted based on Mofid's behavior
 
+
+#railway setting user.json file
+# مسیر volume در Railway
+DATA_DIR = "/app/data"
+USERS_FILE = os.path.join(DATA_DIR, "user.json")
+
 # --- User Data Management (Identical to telegramBotV7.py) ---
 def load_users_data():
+    # ایجاد دایrektori اگر وجود نداشته باشد
+    os.makedirs(DATA_DIR, exist_ok=True)
+    
     if not os.path.exists(USERS_FILE):
         return {"users": [], "tokens": [], "activity_log": {}}
     try:
-        # No lock needed for reading, as reads are safe for concurrent access
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             if "users" not in data: data["users"] = []
@@ -127,6 +135,9 @@ def load_users_data():
         return {"users": [], "tokens": [], "activity_log": {}}
 
 def save_users_data(data):
+    # ایجاد دایrektori اگر وجود نداشته باشد
+    os.makedirs(DATA_DIR, exist_ok=True)
+    
     lock_file = f"{USERS_FILE}.lock"
     lock = FileLock(lock_file, timeout=10)
     max_retries = 3
@@ -136,6 +147,7 @@ def save_users_data(data):
             with lock:  # Acquire exclusive lock for writing
                 with open(USERS_FILE, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=4, ensure_ascii=False)
+                logger.info(f"User data successfully saved to {USERS_FILE}")
                 return  # Success, exit function
         except Timeout:
             logger.warning(f"Timeout acquiring lock for {USERS_FILE}, attempt {attempt + 1}/{max_retries}.")
