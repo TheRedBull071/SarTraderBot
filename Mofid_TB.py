@@ -1681,7 +1681,7 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
         settings_status_text_part = f"{EMOJI['success']} تنظیمات اولیه با موفقیت انجام شد." if settings_reset_successful else f"{EMOJI['warning']} بازنشانی تنظیمات اولیه ممکن است کامل انجام نشده باشد."
         
         
-        final_combined_status_text = f"{login_success_text_part}\n{settings_status_text_part}\n{identity_status_text_part}"
+        final_combined_status_text = f"{login_success_text_part}\n{settings_status_text_part}"
 
         if status_message_id:
             try:
