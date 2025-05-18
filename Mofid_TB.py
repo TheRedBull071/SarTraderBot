@@ -770,7 +770,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     user_data_from_db = find_user_by_telegram_id(user_id)
     
-    # این ربات برای مفید است. اگر کاربر برای کارگزار دیگری ثبت شده باشد، او را راهنمایی کنید.
     if user_data_from_db and user_data_from_db.get("brokerage_type") != "mofid":
         welcome_text = (
             f"{EMOJI['warning']} حساب شما برای کارگزاری دیگری ثبت شده است.\n"
@@ -785,35 +784,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if update.message:
             await update.message.reply_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
         elif update.callback_query:
-            await update.callback_query.edit_message_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+            # اگر از callback_query آمده، سعی می‌کنیم پیام قبلی را ویرایش کنیم
+            try:
+                await update.callback_query.edit_message_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+            except BadRequest: # اگر ویرایش ممکن نبود (مثلا پیام خیلی قدیمی است)، پیام جدید ارسال می‌کنیم
+                await context.bot.send_message(chat_id=user_id, text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
         logger.info(f"User {user_id} redirected to register for Mofid (was registered for another broker)")
         return MAIN_MENU
 
     session.user_data = user_data_from_db
 
-    if user_data_from_db:  # And implicitly brokerage_type is 'mofid' or not set
+    if user_data_from_db:
         if is_subscription_active(user_data_from_db):
             time_left = get_time_remaining(user_data_from_db)
             welcome_text = f"{EMOJI['trade']} {user_data_from_db.get('full_name', 'کاربر')} عزیز، به ربات معاملاتی *کارگزاری مفید* خوش آمدید.!\nزمان باقیمانده اشتراک: *{time_left}*"
             keyboard = [
                 [InlineKeyboardButton(f"{EMOJI['start']} شروع معاملات", callback_data="menu_start_mofid")],
-                [InlineKeyboardButton(f"{EMOJI['tutorial']} راهنمای ربات", callback_data="^menu_tutorial_mofid$")],
+                [InlineKeyboardButton(f"{EMOJI['tutorial']} راهنمای ربات", callback_data="menu_tutorial_mofid")], # تغییر callback_data
                 [InlineKeyboardButton(f"{EMOJI['admin']} ارتباط با پشتیبانی", url="https://t.me/SarTraderBot_Support")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             if update.message:
                 await update.message.reply_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
             elif update.callback_query:
-                await update.callback_query.edit_message_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+                try:
+                    await update.callback_query.edit_message_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+                except BadRequest:
+                     await context.bot.send_message(chat_id=user_id, text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
             logger.info(f"User {user_id} with active subscription directed to main menu")
             return MAIN_MENU
         else:
-            # کاربر با اشتراک منقضی‌شده
             logger.info(f"User {user_id} has expired subscription, directing to EXPIRED_ACCOUNT_OPTIONS")
-            await handle_expired_account_options(update, context)
+            # اطمینان از اینکه handle_expired_account_options با query یا update مناسب فراخوانی می‌شود
+            if update.callback_query:
+                 await handle_expired_account_options(update, context) # ارسال کل آپدیت
+            else:
+                # اگر آپدیت از نوع پیام است، یک آپدیت ساختگی برای query ایجاد نمی‌کنیم
+                # بلکه مستقیما handle_expired_account_options را با آپدیت پیام فراخوانی می‌کنیم
+                # یا منطق نمایش پیام انقضا را مستقیما اینجا پیاده‌سازی می‌کنیم
+                await context.bot.send_message(chat_id=user_id, text=f"{EMOJI['warning']} اشتراک شما منقضی شده است.")
+                await handle_expired_account_options(update, context) # ارسال کل آپدیت
+
             return EXPIRED_ACCOUNT_OPTIONS
     else:
-        # ثبت‌نام کاربر جدید برای مفید
         welcome_text = f"""
 🌟 **به ربات معاملاتی هوشمند کارگزاری مفید خوش آمدید!** 🌟
 
@@ -838,9 +851,110 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if update.message:
             await update.message.reply_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
         elif update.callback_query:
-            await update.callback_query.edit_message_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+            try:
+                await update.callback_query.edit_message_text(text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+            except BadRequest:
+                await context.bot.send_message(chat_id=user_id, text=welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
         logger.info(f"New user {user_id} directed to registration prompt")
         return REGISTER_PROMPT
+
+
+
+async def show_tutorial_mofid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    # اطمینان از اینکه query وجود دارد قبل از استفاده
+    if not query:
+        logger.warning("show_tutorial_mofid called without a callback query.")
+        # اگر query وجود ندارد، نمی‌توانیم پیام را ویرایش کنیم یا پاسخ دهیم.
+        # شاید بهتر باشد یک پیام جدید ارسال کنیم اگر chat_id در دسترس است.
+        if update.effective_chat:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"{EMOJI['error']} خطایی در نمایش راهنما رخ داد. لطفا از منوی اصلی دوباره تلاش کنید.")
+        return MAIN_MENU # یا ConversationHandler.END
+
+    await query.answer() # پاسخ به callback query برای جلوگیری از تایم اوت در کلاینت تلگرام
+    
+    session = context.user_data.get("session") # استفاده از .get برای جلوگیری از KeyError
+    if not session:
+        logger.error(f"Session not found for user {update.effective_user.id} in show_tutorial_mofid")
+        await query.edit_message_text(f"{EMOJI['error']} خطای داخلی رخ داده است. لطفا با /start مجددا تلاش کنید.")
+        return ConversationHandler.END
+        
+    session.update_activity()
+
+    tutorial_text = f"""
+{EMOJI['tutorial']} *آموزش استفاده از ربات معاملاتی مفید*
+
+📌 *مراحل ثبت سفارش:*
+1️⃣ *ورود به حساب:*
+   • وارد کردن نام کاربری و رمز عبور مفید
+   • تأیید ورود به سیستم
+
+2️⃣ *انتخاب نماد:*
+   • جستجو و انتخاب نماد مورد نظر
+   • مثال: وبملت، فولاد، خودرو
+
+3️⃣ *تنظیم سفارش:*
+   • انتخاب خرید یا فروش
+   • تعیین قیمت (بالاترین/پایین‌ترین/دلخواه)
+   • انتخاب روش ارسال:
+     - فوری (ارسال بلافاصله)
+     - زمان‌دار (در زمان مشخص)
+     - سرخطی (ابتدای بازار)
+   • تعیین تعداد سهام
+
+4️⃣ *تأیید و ارسال:*
+   • بررسی جزئیات سفارش
+   • تأیید نهایی و ارسال به کارگزاری
+
+⚡️ *ویژگی‌های خاص:*
+• *دقت زمانی:* ارسال با دقت میلی‌ثانیه
+• *سفارش سرخطی:* ثبت خودکار در شروع بازار
+• *ارسال زمان‌دار:* تنظیم دقیق زمان ارسال
+
+⚠️ *نکات مهم:*
+• پس از هر سفارش، حساب کارگزاری را چک کنید
+• در سفارش‌های سریع، احتمال ثبت چند سفارش وجود دارد
+• مسئولیت صحت اطلاعات و سفارشات با کاربر است
+
+{EMOJI['alert']} *برای شروع معاملات، روی دکمه زیر کلیک کنید:*
+"""
+    keyboard = [
+        [InlineKeyboardButton(f"{EMOJI['start']} شروع معاملات در مفید", callback_data="menu_start_mofid")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back_to_main_action")],
+    ]
+    try:
+        await query.edit_message_text(
+            text=tutorial_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        session.add_log("راهنمای استفاده با موفقیت نمایش داده شد", "success")
+    except BadRequest as e:
+        # اگر پیام ویرایش نشد (مثلا چون محتوا یکسان است یا پیام خیلی قدیمی است)
+        logger.warning(f"Could not edit message for tutorial: {e}. Sending as new message if possible.")
+        session.add_log(f"خطا در ویرایش پیام راهنما: {str(e)}", "warning")
+        # تلاش برای ارسال پیام جدید به عنوان جایگزین
+        try:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id, # استفاده از chat_id پیام اصلی
+                text=tutorial_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            session.add_log("راهنما به صورت پیام جدید ارسال شد (پس از خطای ویرایش)", "info")
+        except Exception as e2:
+            logger.error(f"Failed to send tutorial as new message after edit failure: {e2}")
+            session.add_log(f"خطا در ارسال پیام جدید راهنما (پس از خطای ویرایش): {str(e2)}", "error")
+            # اگر ارسال پیام جدید هم با خطا مواجه شد، به کاربر اطلاع می‌دهیم
+            # این حالت نادر است اما برای کامل بودن در نظر گرفته شده
+            await query.message.reply_text(f"{EMOJI['error']} متاسفانه در نمایش راهنما مشکلی پیش آمد. لطفا دوباره امتحان کنید.")
+            
+    except Exception as e: # سایر خطاهای احتمالی
+        logger.error(f"Unexpected error in show_tutorial_mofid: {e}")
+        session.add_log(f"خطای غیرمنتظره در نمایش راهنما: {str(e)}", "error")
+        await query.message.reply_text(f"{EMOJI['error']} یک خطای پیش‌بینی نشده در نمایش راهنما رخ داد.")
+
+    return MAIN_MENU
 
 
 async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1122,77 +1236,6 @@ async def get_new_token_for_expired(update: Update, context: ContextTypes.DEFAUL
         return EXPIRED_ACCOUNT_OPTIONS # Stay in this state to allow retry or contact
 
 
-async def show_tutorial_mofid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    
-    session = context.user_data["session"]
-    session.update_activity()
-
-    tutorial_text = f"""
-{EMOJI['tutorial']} *آموزش استفاده از ربات معاملاتی مفید*
-
-📌 *مراحل ثبت سفارش:*
-1️⃣ *ورود به حساب:*
-   • وارد کردن نام کاربری و رمز عبور مفید
-   • تأیید ورود به سیستم
-
-2️⃣ *انتخاب نماد:*
-   • جستجو و انتخاب نماد مورد نظر
-   • مثال: وبملت، فولاد، خودرو
-
-3️⃣ *تنظیم سفارش:*
-   • انتخاب خرید یا فروش
-   • تعیین قیمت (بالاترین/پایین‌ترین/دلخواه)
-   • انتخاب روش ارسال:
-     - فوری (ارسال بلافاصله)
-     - زمان‌دار (در زمان مشخص)
-     - سرخطی (ابتدای بازار)
-   • تعیین تعداد سهام
-
-4️⃣ *تأیید و ارسال:*
-   • بررسی جزئیات سفارش
-   • تأیید نهایی و ارسال به کارگزاری
-
-⚡️ *ویژگی‌های خاص:*
-• *دقت زمانی:* ارسال با دقت میلی‌ثانیه
-• *سفارش سرخطی:* ثبت خودکار در شروع بازار
-• *ارسال زمان‌دار:* تنظیم دقیق زمان ارسال
-
-⚠️ *نکات مهم:*
-• پس از هر سفارش، حساب کارگزاری را چک کنید
-• در سفارش‌های سریع، احتمال ثبت چند سفارش وجود دارد
-• مسئولیت صحت اطلاعات و سفارشات با کاربر است
-
-{EMOJI['alert']} *برای شروع معاملات، روی دکمه زیر کلیک کنید:*
-"""
-    keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['start']} شروع معاملات در مفید", callback_data="menu_start_mofid")],
-        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back_to_main_action")],
-    ]
-    try:
-        await query.edit_message_text(
-            text=tutorial_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-        session.add_log("راهنمای استفاده با موفقیت نمایش داده شد", "success")
-    except Exception as e:
-        session.add_log(f"خطا در نمایش راهنما: {str(e)}", "error")
-        # Try sending as new message if editing fails
-        try:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=tutorial_text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
-            session.add_log("راهنما به صورت پیام جدید ارسال شد", "success")
-        except Exception as e2:
-            session.add_log(f"خطا در ارسال پیام جدید راهنما: {str(e2)}", "error")
-            await query.message.reply_text(f"{EMOJI['error']} خطا در نمایش راهنما. لطفا دوباره تلاش کنید.")
-
-    return MAIN_MENU
 
 
 async def show_admin_contact_mofid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2761,9 +2804,9 @@ def main() -> None:
         entry_points=[CommandHandler("start", start)],
         states={
             MAIN_MENU: [
-                CallbackQueryHandler(show_tutorial_mofid, pattern="^menu_tutorial_mofid$"),
-                CallbackQueryHandler(start_trading_mofid, pattern="^menu_start_mofid$"),
-                CallbackQueryHandler(show_admin_contact_mofid, pattern="^menu_admin_mofid$"),
+                CallbackQueryHandler(show_tutorial_mofid, pattern="menu_tutorial_mofid"), # تغییر پترن
+                CallbackQueryHandler(start_trading_mofid, pattern="menu_start_mofid"),
+                CallbackQueryHandler(show_admin_contact_mofid, pattern="^menu_admin_mofid$"), # اگر این هم مشکل دارد، ^ و $ را بردارید
                 CallbackQueryHandler(restart_full_process, pattern="^restart_full_process$"),
                 CallbackQueryHandler(force_register_mofid, pattern="^force_register_mofid$"),
             ],
