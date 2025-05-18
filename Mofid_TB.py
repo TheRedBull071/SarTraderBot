@@ -1295,13 +1295,13 @@ async def get_brokerage_password(update: Update, context: ContextTypes.DEFAULT_T
     session = context.user_data["session"]
     session.update_activity()
     password = update.message.text.strip()
-    session.credentials["brokerage_password"] = password
+    # session.credentials["brokerage_password"] = password # این خط به attempt_mofid_login منتقل می‌شود
     session.add_log("رمز عبور کارگزاری مفید دریافت شد", "info")
 
     user_data = session.user_data
     if not user_data or not is_subscription_active(user_data):
         await update.message.reply_text(f"{EMOJI['error']} اشتراک شما غیرفعال است. لطفا با /start شروع کنید.")
-        return await start(update, context)
+        return await start(update, context) # یا ConversationHandler.END
 
     username = user_data.get("brokerage_username")
     if not username:
@@ -1309,90 +1309,10 @@ async def get_brokerage_password(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"{EMOJI['error']} خطای داخلی: نام کاربری کارگزاری یافت نشد.")
         return ConversationHandler.END
 
-    is_limited, limit_message = check_login_rate_limit(session.user_id)
-    if is_limited:
-        await update.message.reply_text(limit_message)
-        return LOGIN_ENTER_BROKERAGE_PASSWORD
-
-    loading_msg = await update.message.reply_text(f"{EMOJI['loading']} در حال ورود به کارگزاری مفید...")
-
-    login_result = await session.mofid_login(username, password)
-    if login_result["success"]:
-        reset_login_attempts(session.user_id)
-        session.add_log("ورود به کارگزاری مفید موفق بود", "success")
-        session.credentials["brokerage_password"] = password
-        session.is_logged_in = True
-
-        # Save password to database
-        connection = get_db_connection()
-        try:
-            cursor = connection.cursor()
-            cursor.execute("""
-                UPDATE users
-                SET brokerage_password = %s
-                WHERE telegram_id = %s
-            """, (password, session.user_id))
-            connection.commit()
-            session.add_log("رمز عبور در دیتابیس ذخیره شد", "success")
-        except Error as e:
-            logger.error(f"Error saving password for user {session.user_id}: {e}")
-        finally:
-            if connection.is_connected():
-                cursor.close()
-                connection.close()
-
-        # Retrieve and save user identity info after first successful login
-        user_db = find_user_by_telegram_id(session.user_id)
-        if not user_db.get("real_name") and not user_db.get("national_id"):  # Only if not already set
-            try:
-                user_info = session.bot.get_user_info()  # Assumed method from MofidBroker
-                connection = get_db_connection()
-                cursor = connection.cursor()
-                cursor.execute("""
-                    UPDATE users
-                    SET real_name = %s, national_id = %s, phone_number = %s, email = %s
-                    WHERE telegram_id = %s
-                """, (
-                    user_info.get("real_name"),
-                    user_info.get("national_id"),
-                    user_info.get("phone_number"),
-                    user_info.get("email"),
-                    session.user_id
-                ))
-                connection.commit()
-                session.add_log("اطلاعات هویتی کاربر از کارگزاری دریافت و ذخیره شد", "success")
-            except Exception as e:
-                logger.error(f"Error retrieving/saving user info for {session.user_id}: {e}")
-                session.add_log(f"خطا در دریافت/ذخیره اطلاعات هویتی: {str(e)}", "error")
-            finally:
-                if connection.is_connected():
-                    cursor.close()
-                    connection.close()
-
-        # Start inactivity check
-        if session.inactivity_timeout_task:
-            session.inactivity_timeout_task.cancel()
-        session.inactivity_timeout_task = asyncio.create_task(session.check_inactivity(context))
-
-        await loading_msg.edit_text(f"{EMOJI['success']} ورود به کارگزاری مفید موفقیت‌آمیز بود.")
-        await update.message.reply_text(
-            f"{EMOJI['trade']} لطفا نماد سهام را وارد کنید (مثال: وبملت):"
-        )
-        return STOCK_SELECTION
-    else:
-        record_failed_login_attempt(session.user_id)
-        session.add_log(f"ورود به مفید ناموفق: {login_result['message']}", "error")
-        await loading_msg.edit_text(f"{EMOJI['error']} خطا: {login_result['message']}")
-        keyboard = [
-            [InlineKeyboardButton(f"{EMOJI['password']} تلاش مجدد", callback_data="retry_mofid_login_prompt")],
-            [InlineKeyboardButton(f"{EMOJI['admin']} تماس با پشتیبانی", url="https://t.me/SarTraderBot_Support")],
-            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back_to_main_action")]
-        ]
-        await update.message.reply_text(
-            "لطفا یکی از گزینه‌ها را انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return LOGIN_CONFIRM_DETAILS
+    # مستقیما به attempt_mofid_login می‌رویم و پسورد را هم پاس می‌دهیم
+    # یا پسورد را در session.credentials ذخیره کرده و در attempt_mofid_login استفاده می‌کنیم
+    session.credentials["brokerage_password"] = password 
+    return await attempt_mofid_login(update, context)
     
 
 async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1404,29 +1324,34 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.effective_chat.id
 
     brokerage_username = user_data.get("brokerage_username")
+    # رمز عبور از session.credentials که در get_brokerage_password ست شده خوانده می‌شود
     brokerage_password = session.credentials.get("brokerage_password")
+
+    if not brokerage_password:
+        # این حالت نباید رخ دهد اگر get_brokerage_password به درستی فراخوانی شده باشد
+        await context.bot.send_message(chat_id=chat_id, text=f"{EMOJI['error']} خطای داخلی: رمز عبور یافت نشد. لطفا مجددا تلاش کنید.")
+        return LOGIN_CONFIRM_DETAILS
 
     is_limited, limit_message = check_login_rate_limit(session.user_id)
     if is_limited:
         target_message_text = limit_message
         try:
-            if update.callback_query: # If triggered by a button
+            if update.callback_query: 
                 await update.callback_query.edit_message_text(text=target_message_text)
-            elif update.message: # If triggered by a text message (e.g., password input)
+            elif update.message: 
                 await update.message.reply_text(text=target_message_text)
-            else: # Fallback
+            else: 
                 await context.bot.send_message(chat_id=chat_id, text=target_message_text)
         except BadRequest as e:
             logger.warning(f"Failed to edit/reply with rate limit message: {e}. Sending new message.")
             await context.bot.send_message(chat_id=chat_id, text=target_message_text)
         except Exception as e:
             logger.error(f"Unexpected error sending/editing rate limit message: {e}")
-            await context.bot.send_message(chat_id=chat_id, text=target_message_text) # Fallback
+            await context.bot.send_message(chat_id=chat_id, text=target_message_text) 
 
-        record_failed_login_attempt(session.user_id)
+        # record_failed_login_attempt(session.user_id) # این خط تکراری است و در صورت شکست لاگین فراخوانی می‌شود
         return LOGIN_CONFIRM_DETAILS
 
-    # Send initial status message (always a new message)
     try:
         status_message_obj = await context.bot.send_message(
             chat_id=chat_id,
@@ -1436,89 +1361,68 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Failed to send initial status message: {e}")
         try:
-            # Try to inform user via original update context
             error_notification = f"{EMOJI['error']} خطایی در نمایش وضعیت رخ داد. لطفاً دوباره تلاش کنید."
             if update.message: await update.message.reply_text(error_notification)
-            elif update.callback_query: await update.callback_query.answer(error_notification, show_alert=True) # Use answer for callbacks
+            elif update.callback_query: await update.callback_query.answer(error_notification, show_alert=True)
         except Exception as ie:
             logger.error(f"Failed to notify user about status message sending error: {ie}")
         return LOGIN_CONFIRM_DETAILS
 
     login_result = await session.mofid_login(brokerage_username, brokerage_password)
-
-    if not login_result["success"]:
-        record_failed_login_attempt(session.user_id) # Ensure this is called on failure
     
     if login_result["success"]:
         reset_login_attempts(session.user_id)
         session.add_log("ورود به کارگزاری مفید موفقیت آمیز بود", "success")
-        
-        # Edit status message for login success and settings start
+        session.is_logged_in = True # اطمینان از ست شدن فلگ لاگین
+
         login_success_and_settings_start_text = f"{EMOJI['success']} ورود به حساب کارگزاری مفید با موفقیت انجام شد!\n{EMOJI['loading']} در حال ست کردن تنظیمات اولیه ..."
         if status_message_id:
             try:
                 await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=status_message_id,
-                    text=login_success_and_settings_start_text
+                    chat_id=chat_id, message_id=status_message_id, text=login_success_and_settings_start_text
                 )
             except Exception as e:
                 logger.warning(f"Could not edit status message {status_message_id} after login success: {e}. Sending new.")
-                # Fallback: send new message if edit fails
                 status_message_obj = await context.bot.send_message(chat_id=chat_id, text=login_success_and_settings_start_text)
-                status_message_id = status_message_obj.message_id # Update message ID if a new one was sent
-        else: # Should not happen if initial message was sent and ID captured
+                status_message_id = status_message_obj.message_id
+        else:
              status_message_obj = await context.bot.send_message(chat_id=chat_id, text=login_success_and_settings_start_text)
              status_message_id = status_message_obj.message_id
-
 
         if session.inactivity_timeout_task:
             session.inactivity_timeout_task.cancel()
         session.inactivity_timeout_task = asyncio.create_task(session.check_inactivity(context))
 
-        # --- START OF SETTINGS RESET ---
         settings_reset_successful = False
         try:
             session.add_log("شروع فرآیند بازنشانی تنظیمات به حالت پیش‌فرض...", "info")
-            # 1. Click on settings icon
             try:
                 session.add_log("در حال کلیک روی آیکون تنظیمات...", "info")
                 settings_icon_clickable_part = session.bot.wait_for_element(By.CSS_SELECTOR, "li#settings-li span#settings-span", timeout=15) 
                 settings_icon_clickable_part.click()
                 session.add_log("روی آیکون تنظیمات کلیک شد.", "success")
                 await asyncio.sleep(1) 
-            except TimeoutException:
-                session.add_log("خطا: آیکون تنظیمات در زمان مقرر پیدا نشد.", "error")
-                logger.error(f"Timeout finding settings icon for user {session.user_id}")
             except Exception as e:
                 session.add_log(f"خطا در کلیک روی آیکون تنظیمات: {str(e)}", "error")
                 logger.error(f"Error clicking settings icon for user {session.user_id}: {e}")
 
-            # 2. Click on "reset to default" button
             try:
                 session.add_log("در حال کلیک روی دکمه 'بازگشت به تنظیمات پیش‌فرض'...", "info")
                 reset_button = session.bot.wait_for_element(By.CSS_SELECTOR, "div[data-cy='reset-to-default-setting-btn']", timeout=10) 
                 reset_button.click()
                 session.add_log("روی دکمه 'بازگشت به تنظیمات پیش‌فرض' کلیک شد.", "success")
                 await asyncio.sleep(1) 
-            except TimeoutException:
-                session.add_log("خطا: دکمه 'بازگشت به تنظیمات پیش‌فرض' در زمان مقرر پیدا نشد.", "error")
-                logger.error(f"Timeout finding reset-to-default button for user {session.user_id}")
             except Exception as e:
                 session.add_log(f"خطا در کلیک روی دکمه 'بازگشت به تنظیمات پیش‌فرض': {str(e)}", "error")
                 logger.error(f"Error clicking reset-to-default button for user {session.user_id}: {e}")
 
-            # 3. Click on "confirm" button in the modal
             try:
                 session.add_log("در حال کلیک روی دکمه 'تایید' در مودال...", "info")
                 confirm_button = session.bot.wait_for_element(By.CSS_SELECTOR, "button[data-cy='setting-reset-to-default-modal-confirm']", timeout=10) 
                 confirm_button.click()
                 session.add_log("روی دکمه 'تایید' در مودال کلیک شد. تنظیمات باید بازنشانی شده باشند.", "success")
-                settings_reset_successful = True # Mark as successful
+                settings_reset_successful = True
                 await asyncio.sleep(1.5) 
-            except TimeoutException:
-                session.add_log("خطا: دکمه 'تایید' در مودال در زمان مقرر پیدا نشد.", "error")
-                logger.error(f"Timeout finding confirm button in modal for user {session.user_id}")
             except Exception as e:
                 session.add_log(f"خطا در کلیک روی دکمه 'تایید' در مودال: {str(e)}", "error")
                 logger.error(f"Error clicking confirm button in modal for user {session.user_id}: {e}")
@@ -1527,72 +1431,71 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             session.add_log(f"خطای کلی در فرآیند بازنشانی تنظیمات: {str(e)}", "error")
             logger.error(f"Overall error in settings reset process for user {session.user_id}: {e}")
-        # --- END OF SETTINGS RESET ---
 
-        # --- START OF PASSWORD AND IDENTITY EXTRACTION --- (This block remains as is)
-        identity_extraction_attempted = False
-        identity_extraction_successful = False 
-        all_data = load_users_data()
-        user_db_entry = next((u for u in all_data["users"] if str(u.get("telegram_id")) == str(session.user_id)), None)
-        
-        identity_fields_to_check = ["real_name", "national_id", "phone_number", "email"]
-        is_identity_incomplete = True 
-        if user_db_entry:
-            is_identity_incomplete = not all(user_db_entry.get(field) for field in identity_fields_to_check)
-        
-        if user_db_entry:
-            user_db_entry["brokerage_password"] = brokerage_password
-            session.add_log("رمز عبور کارگزاری در فایل JSON ذخیره/به‌روزرسانی شد.", "success")
-        else:
-            user_db_entry = {
-                "telegram_id": str(session.user_id),
-                "brokerage_username": brokerage_username,
-                "brokerage_password": brokerage_password,
-                "brokerage_type": "mofid",
-                "full_name": session.user_data.get("full_name", ""),
-                "registration_date": session.user_data.get("registration_date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            }
-            all_data["users"].append(user_db_entry)
-            session.add_log("کاربر جدید با رمز عبور در فایل JSON ذخیره شد.", "success")
-        save_users_data(all_data)
+        # --- START OF PASSWORD AND IDENTITY EXTRACTION (DATABASE VERSION) ---
+        identity_extraction_successful = False
+        connection_for_identity = None # مقدار اولیه
+        try:
+            # ابتدا رمز عبور را در دیتابیس ذخیره می‌کنیم
+            connection_for_password = get_db_connection()
+            if connection_for_password and connection_for_password.is_connected():
+                cursor_pw = connection_for_password.cursor()
+                cursor_pw.execute("""
+                    UPDATE users
+                    SET brokerage_password = %s
+                    WHERE telegram_id = %s
+                """, (brokerage_password, session.user_id))
+                connection_for_password.commit()
+                session.add_log("رمز عبور کارگزاری در پایگاه داده ذخیره/به‌روزرسانی شد.", "success")
+                cursor_pw.close()
+            else:
+                session.add_log("خطا: عدم اتصال به پایگاه داده برای ذخیره رمز عبور.", "error")
+                logger.error(f"DB connection error for saving password - User {session.user_id}")
 
-        if is_identity_incomplete:
-            identity_extraction_attempted = True
-            session.add_log("اطلاعات هویتی ناقص است یا اولین ورود. شروع فرآیند استخراج...", "info")
-            original_window = session.bot.driver.current_window_handle
-            windows_before_click = set(session.bot.driver.window_handles)
-            
-            try:
-                # 1. Click on the profile popover
+            # بررسی اینکه آیا اطلاعات هویتی ناقص است یا خیر
+            user_db_entry = find_user_by_telegram_id(session.user_id) # اطلاعات کاربر را مجددا از دیتابیس می‌خوانیم
+            identity_fields_to_check = ["real_name", "national_id", "phone_number", "email"]
+            is_identity_incomplete = True
+            if user_db_entry:
+                is_identity_incomplete = not all(user_db_entry.get(field) for field in identity_fields_to_check)
+
+            if is_identity_incomplete:
+                session.add_log("اطلاعات هویتی ناقص است یا اولین ورود. شروع فرآیند استخراج...", "info")
+                identity_data_extracted = {} # دیکشنری برای نگهداری اطلاعات استخراج شده
+                
+                # --- منطق Selenium برای استخراج اطلاعات هویتی (مشابه Mofid_TB6.py) ---
+                original_window = None
+                new_tab_opened = False
                 try:
+                    if not session.bot.driver:
+                        session.add_log("خطا: درایور Selenium برای استخراج اطلاعات هویتی موجود نیست.", "error")
+                        raise Exception("Selenium driver not available for identity extraction.")
+
+                    original_window = session.bot.driver.current_window_handle
+                    windows_before_click = set(session.bot.driver.window_handles)
+                    
                     session.add_log("در حال کلیک روی منوی پروفایل (market-data-pop-over)...", "info")
                     profile_popover_css_selector = "div[data-cy='market-data-pop-over']"
                     profile_popover = WebDriverWait(session.bot.driver, 15).until( 
                         EC.element_to_be_clickable((By.CSS_SELECTOR, profile_popover_css_selector))
                     )
                     session.bot.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", profile_popover)
-                    await asyncio.sleep(0.3) 
+                    await asyncio.sleep(0.3)
                     try:
                         profile_popover.click()
                     except ElementClickInterceptedException:
                         session.add_log("کلیک مستقیم روی منوی پروفایل رهگیری شد. تلاش با کلیک جاوا اسکریپت...", "warning")
                         session.bot.driver.execute_script("arguments[0].click();", profile_popover)
                     session.add_log("روی منوی پروفایل کلیک شد.", "success")
-                    await asyncio.sleep(1) 
-                except Exception as e_popover:
-                    session.add_log(f"خطا در کلیک روی منوی پروفایل: {str(e_popover)}", "error")
-                    logger.error(f"Error clicking profile_popover for user {session.user_id}: {e_popover}")
-                    raise 
+                    await asyncio.sleep(1)
 
-                # 2. Click on "ویرایش حساب کاربری"
-                try:
                     session.add_log("در حال کلیک روی 'ویرایش حساب کاربری'...", "info")
                     edit_account_button_xpath = "//div[contains(@class, 'dropdown-item') and contains(., 'ویرایش حساب کاربری')]"
                     edit_account_button = WebDriverWait(session.bot.driver, 10).until( 
                         EC.element_to_be_clickable((By.XPATH, edit_account_button_xpath))
                     )
                     session.bot.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", edit_account_button)
-                    await asyncio.sleep(0.3) 
+                    await asyncio.sleep(0.3)
                     try:
                         edit_account_button.click()
                     except ElementClickInterceptedException:
@@ -1605,28 +1508,19 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
                                        "profile" in driver.current_url.lower() or \
                                        "customer" in driver.current_url.lower() 
                     )
-                    await asyncio.sleep(1) 
+                    await asyncio.sleep(1)
 
-                except Exception as e_edit_account:
-                    session.add_log(f"خطا در کلیک روی 'ویرایش حساب کاربری': {str(e_edit_account)}", "error")
-                    logger.error(f"Error clicking edit_account_button for user {session.user_id}: {e_edit_account}")
-                    raise
-
-                current_windows = set(session.bot.driver.window_handles)
-                new_tab_opened = False
-                if len(current_windows) > len(windows_before_click):
-                    new_window_handle = (current_windows - windows_before_click).pop()
-                    session.bot.driver.switch_to.window(new_window_handle)
-                    new_tab_opened = True
-                    session.add_log(f"به تب جدید پروفایل ({new_window_handle}) سوئیچ شد.", "info")
-                    await asyncio.sleep(0.5) 
-
-                identity_data_extracted = {}
-                profile_list_xpath = "//div[contains(@class, 'profile-list')]" 
-                
-                try:
+                    current_windows = set(session.bot.driver.window_handles)
+                    if len(current_windows) > len(windows_before_click):
+                        new_window_handle = (current_windows - windows_before_click).pop()
+                        session.bot.driver.switch_to.window(new_window_handle)
+                        new_tab_opened = True
+                        session.add_log(f"به تب جدید پروفایل ({new_window_handle}) سوئیچ شد. URL: {session.bot.driver.current_url}", "info")
+                        await asyncio.sleep(0.5)
+                    
+                    profile_list_xpath = "//div[contains(@class, 'profile-list')]"
                     session.add_log(f"در حال تلاش برای یافتن کانتینر اطلاعات پروفایل در آدرس: {session.bot.driver.current_url}", "debug")
-                    WebDriverWait(session.bot.driver, 15).until( 
+                    WebDriverWait(session.bot.driver, 20).until( # افزایش زمان انتظار
                         EC.visibility_of_element_located((By.XPATH, profile_list_xpath))
                     )
                     session.add_log("کانتینر اطلاعات پروفایل (profile-list) پیدا شد.", "info")
@@ -1643,10 +1537,8 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
                         try:
                             session.bot.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", item)
                             await asyncio.sleep(0.1) 
-
                             label_element = item.find_element(By.CSS_SELECTOR, "div.font-bold.text-sm")
                             label_text = label_element.text.strip()
-                            
                             value_text = ""
                             value_container = item.find_element(By.XPATH, ".//div[contains(@class, 'flex-1') and contains(@class, 'flex') and contains(@class, 'w-full')]")
                             child_divs = value_container.find_elements(By.XPATH, "./div")
@@ -1691,52 +1583,84 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
                     else:
                          session.add_log("هشدار: هیچ اطلاعات هویتی از آیتم‌های پروفایل استخراج نشد.", "warning")
 
-
-                    if user_db_entry: 
-                        updated_fields = False
-                        for key, value in identity_data_extracted.items():
-                            if value and user_db_entry.get(key) != value : 
-                                user_db_entry[key] = value
-                                updated_fields = True
-                        if updated_fields:
-                            save_users_data(all_data)
-                            session.add_log("اطلاعات هویتی استخراج و در فایل JSON ذخیره شد.", "success")
-                        else:
-                            session.add_log("اطلاعات هویتی استخراج شده تغییری ایجاد نکرد یا خالی بود.", "info")
-                    session.user_data = find_user_by_telegram_id(session.user_id) 
-
                 except TimeoutException as e_profile_content:
                     session.add_log(f"خطای Timeout: محتوای صفحه پروفایل (profile-list) در زمان مقرر بارگذاری نشد. URL: {session.bot.driver.current_url}", "error")
                     logger.error(f"Timeout waiting for profile content for user {session.user_id}: {e_profile_content}")
                 except Exception as e_extract_generic:
                     session.add_log(f"خطای کلی در استخراج اطلاعات هویتی: {str(e_extract_generic)}", "error")
                     logger.error(f"Generic error extracting identity info for user {session.user_id} at URL {session.bot.driver.current_url}: {e_extract_generic}")
-                
-                finally: 
-                    if new_tab_opened:
+                finally:
+                    if new_tab_opened and original_window:
                         try:
-                            current_tab_title = session.bot.driver.title
-                            session.add_log(f"بستن تب پروفایل: '{current_tab_title}'", "info")
+                            session.add_log(f"بستن تب پروفایل: '{session.bot.driver.title}'", "info")
                             session.bot.driver.close()
                             session.bot.driver.switch_to.window(original_window)
                             session.add_log(f"بازگشت به تب اصلی: '{session.bot.driver.title}'", "info")
                         except Exception as e_tab_close:
                             session.add_log(f"خطا در بستن تب پروفایل یا سوئیچ به تب اصلی: {e_tab_close}", "error")
-                            logger.error(f"Error closing profile tab or switching back for user {session.user_id}: {e_tab_close}")
-                            try:
-                                session.bot.driver.switch_to.window(original_window)
+                            logger.error(f"Error closing/switching tab for user {session.user_id}: {e_tab_close}")
+                            try: # تلاش برای بازگشت به صفحه اصلی در صورت خطا
+                                if original_window in session.bot.driver.window_handles:
+                                    session.bot.driver.switch_to.window(original_window)
                                 session.bot.driver.get("https://online.mofidbrokerage.ir/")
                             except: pass
-                    elif "profile" in session.bot.driver.current_url.lower() or "customer" in session.bot.driver.current_url.lower():
+                    elif ("profile" in session.bot.driver.current_url.lower() or \
+                          "customer" in session.bot.driver.current_url.lower()) and \
+                          session.bot.driver.current_window_handle == original_window:
                         try:
                             session.bot.driver.get("https://online.mofidbrokerage.ir/") 
                             session.add_log("بازگشت به صفحه اصلی معاملات (از همان تب).", "info")
                             await asyncio.sleep(0.5) 
                         except Exception as e_nav_same_tab:
                              session.add_log(f"خطا در بازگشت به صفحه اصلی (از همان تب): {e_nav_same_tab}", "warning")
-            except Exception as e_identity_process_outer:
-                session.add_log(f"خطای کلی در فرآیند استخراج اطلاعات هویتی (سطح بالا): {str(e_identity_process_outer)}", "error")
-                logger.error(f"Outer overall error in identity extraction for user {session.user_id}: {e_identity_process_outer}")
+                # --- پایان منطق Selenium ---
+
+                if identity_extraction_successful and identity_data_extracted:
+                    connection_for_identity = get_db_connection()
+                    if connection_for_identity and connection_for_identity.is_connected():
+                        cursor_id = connection_for_identity.cursor()
+                        # فقط فیلدهایی که مقدار دارند را آپدیت می‌کنیم
+                        update_query_parts = []
+                        update_values = []
+                        if identity_data_extracted.get("real_name"):
+                            update_query_parts.append("real_name = %s")
+                            update_values.append(identity_data_extracted["real_name"])
+                        if identity_data_extracted.get("national_id"):
+                            update_query_parts.append("national_id = %s")
+                            update_values.append(identity_data_extracted["national_id"])
+                        if identity_data_extracted.get("phone_number"):
+                            update_query_parts.append("phone_number = %s")
+                            update_values.append(identity_data_extracted["phone_number"])
+                        if identity_data_extracted.get("email"):
+                            update_query_parts.append("email = %s")
+                            update_values.append(identity_data_extracted["email"])
+                        
+                        if update_query_parts:
+                            update_query_string = f"UPDATE users SET {', '.join(update_query_parts)} WHERE telegram_id = %s"
+                            update_values.append(session.user_id)
+                            cursor_id.execute(update_query_string, tuple(update_values))
+                            connection_for_identity.commit()
+                            session.add_log("اطلاعات هویتی استخراج و در پایگاه داده ذخیره شد.", "success")
+                        else:
+                            session.add_log("اطلاعات هویتی استخراج شده برای به‌روزرسانی معتبر نبودند یا خالی بودند.", "info")
+                        cursor_id.close()
+                    else:
+                        session.add_log("خطا: عدم اتصال به پایگاه داده برای ذخیره اطلاعات هویتی.", "error")
+                        logger.error(f"DB connection error for saving identity - User {session.user_id}")
+                else:
+                    session.add_log("استخراج اطلاعات هویتی ناموفق بود یا اطلاعاتی برای ذخیره وجود نداشت.", "warning")
+            else:
+                session.add_log("اطلاعات هویتی کامل است. نیازی به استخراج مجدد نیست.", "info")
+                identity_extraction_successful = True # چون نیازی نبوده، موفق فرض می‌شود
+
+        except Error as db_err: # خطاهای مربوط به دیتابیس در اینجا گرفته می‌شوند
+            logger.error(f"Database error during identity/password saving for user {session.user_id}: {db_err}")
+            session.add_log(f"خطای پایگاه داده در ذخیره اطلاعات: {str(db_err)}", "error")
+        except Exception as e_identity_outer: # خطاهای دیگر (مثلا Selenium)
+            logger.error(f"Outer error during identity extraction/saving for user {session.user_id}: {e_identity_outer}")
+            session.add_log(f"خطای کلی در فرآیند استخراج/ذخیره اطلاعات هویتی: {str(e_identity_outer)}", "error")
+            # تلاش برای بازگرداندن درایور به حالت اولیه در صورت بروز خطا در Selenium
+            if original_window and session.bot.driver:
                 try:
                     if session.bot.driver.current_window_handle != original_window and original_window in session.bot.driver.window_handles:
                         session.bot.driver.switch_to.window(original_window)
@@ -1744,43 +1668,41 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
                          session.bot.driver.get("https://online.mofidbrokerage.ir/")
                 except Exception as e_final_cleanup:
                     logger.error(f"Error during final cleanup after identity extraction error for user {session.user_id}: {e_final_cleanup}")
-        else:
-            session.add_log("اطلاعات هویتی کامل است. نیازی به استخراج مجدد نیست.", "info")
-            identity_extraction_successful = True # Considered successful as it was not needed
+        finally:
+            if connection_for_password and connection_for_password.is_connected():
+                connection_for_password.close()
+            if connection_for_identity and connection_for_identity.is_connected():
+                connection_for_identity.close()
         # --- END OF PASSWORD AND IDENTITY EXTRACTION ---
 
-        # Edit status message after all operations (login + settings)
+        session.user_data = find_user_by_telegram_id(session.user_id) # به‌روزرسانی اطلاعات کاربر در session
+
         login_success_text_part = f"{EMOJI['success']} ورود به حساب کارگزاری مفید با موفقیت انجام شد!"
-        settings_status_text_part = ""
-        if settings_reset_successful:
-            settings_status_text_part = f"{EMOJI['success']} تنظیمات اولیه با موفقیت انجام شد."
-        else:
-            settings_status_text_part = f"{EMOJI['warning']} بازنشانی تنظیمات اولیه ممکن است کامل انجام نشده باشد."
-            # You might want to add more details from session.logs about settings failure if needed
+        settings_status_text_part = f"{EMOJI['success']} تنظیمات اولیه با موفقیت انجام شد." if settings_reset_successful else f"{EMOJI['warning']} بازنشانی تنظیمات اولیه ممکن است کامل انجام نشده باشد."
+        identity_status_text_part = f"{EMOJI['success']} اطلاعات هویتی بررسی شد." if identity_extraction_successful else f"{EMOJI['warning']} بررسی اطلاعات هویتی با مشکل مواجه شد یا اطلاعات ناقص است."
         
-        final_combined_status_text = f"{login_success_text_part}\n{settings_status_text_part}"
+        final_combined_status_text = f"{login_success_text_part}\n{settings_status_text_part}\n{identity_status_text_part}"
 
         if status_message_id:
             try:
                 await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=status_message_id,
-                    text=final_combined_status_text
+                    chat_id=chat_id, message_id=status_message_id, text=final_combined_status_text
                 )
             except Exception as e:
                 logger.warning(f"Could not edit status message {status_message_id} with final status: {e}. Sending new.")
-                await context.bot.send_message(chat_id=chat_id, text=final_combined_status_text) # Fallback
-        else: # Should not happen
+                await context.bot.send_message(chat_id=chat_id, text=final_combined_status_text)
+        else:
             await context.bot.send_message(chat_id=chat_id, text=final_combined_status_text)
 
-        # Ask for stock symbol (this is a new message, which is fine)
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"{EMOJI['trade']} لطفا نماد سهام مورد نظر را وارد کنید (مثال: وبملت):"
         )
         return STOCK_SELECTION
     else: # Login failed
-        # Delete the "در حال ورود..." status message if it exists
+        record_failed_login_attempt(session.user_id) # ثبت تلاش ناموفق
+        session.add_log(f"ورود به مفید ناموفق: {login_result['message']}", "error") # لاگ کردن خطای ورود
+
         if status_message_id:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=status_message_id)
@@ -1793,8 +1715,8 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
             [InlineKeyboardButton("🚪 بازگشت به منوی اصلی", callback_data="back_to_main_action")]
         ]
         
-        all_data_fail = load_users_data() # Renamed to avoid conflict with all_data above
-        user_db_fail = next((user for user in all_data_fail["users"] if str(user.get("telegram_id")) == str(session.user_id)), None)
+        # بررسی امکان تغییر نام کاربری (مشابه کد JSON)
+        user_db_fail = find_user_by_telegram_id(session.user_id)
         identity_fields_for_lock = ["real_name", "national_id"] 
         can_change_username = not user_db_fail or \
                               not all(user_db_fail.get(field) for field in identity_fields_for_lock) or \
@@ -1813,7 +1735,6 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=InlineKeyboardMarkup(keyboard_opts)
         )
         return LOGIN_CONFIRM_DETAILS
-
 
 async def change_brokerage_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle request to change brokerage username for users with no prior successful login."""
