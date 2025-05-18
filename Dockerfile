@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     libglib2.0-0 \
     libnss3 \
-    libgconf-2-4 \
     libfontconfig1 \
     libx11-6 \
     libx11-xcb1 \
@@ -36,13 +35,18 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
 # Install Google Chrome
 RUN apt-get update && apt-get install -y google-chrome-stable && rm -rf /var/lib/apt/lists/*
 
-# Install Chromedriver
-RUN CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+') \
+# Install Chromedriver with error handling
+RUN CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+' || echo "not-found") \
+    && if [ "$CHROME_VERSION" = "not-found" ]; then echo "Failed to get Chrome version"; exit 1; fi \
+    && echo "Detected Chrome version: $CHROME_VERSION" \
+    && wget -q --spider "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chromedriver-linux64.zip" \
+    && if [ $? -ne 0 ]; then echo "Chromedriver not found for version $CHROME_VERSION"; exit 1; fi \
     && wget -q "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chromedriver-linux64.zip" \
     && unzip chromedriver-linux64.zip \
     && mv chromedriver-linux64/chromedriver /usr/local/bin/ \
     && chmod +x /usr/local/bin/chromedriver \
-    && rm chromedriver-linux64.zip
+    && rm chromedriver-linux64.zip \
+    && chromedriver --version
 
 # Copy project files
 COPY . .
