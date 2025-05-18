@@ -28,20 +28,14 @@ RUN apt-get update && apt-get install -y \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Add Google Chrome repository
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list
+# Install specific version of Google Chrome
+RUN wget -q "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_126.0.6478.126-1_amd64.deb" \
+    && apt-get update && apt-get install -y ./google-chrome-stable_126.0.6478.126-1_amd64.deb \
+    && rm google-chrome-stable_126.0.6478.126-1_amd64.deb \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Google Chrome
-RUN apt-get update && apt-get install -y google-chrome-stable && rm -rf /var/lib/apt/lists/*
-
-# Install Chromedriver with error handling
-RUN CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+' || echo "not-found") \
-    && if [ "$CHROME_VERSION" = "not-found" ]; then echo "Failed to get Chrome version"; exit 1; fi \
-    && echo "Detected Chrome version: $CHROME_VERSION" \
-    && wget -q --spider "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chromedriver-linux64.zip" \
-    && if [ $? -ne 0 ]; then echo "Chromedriver not found for version $CHROME_VERSION"; exit 1; fi \
-    && wget -q "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chromedriver-linux64.zip" \
+# Install specific version of Chromedriver
+RUN wget -q "https://storage.googleapis.com/chrome-for-testing-public/126.0.6478.126/linux64/chromedriver-linux64.zip" \
     && unzip chromedriver-linux64.zip \
     && mv chromedriver-linux64/chromedriver /usr/local/bin/ \
     && chmod +x /usr/local/bin/chromedriver \
