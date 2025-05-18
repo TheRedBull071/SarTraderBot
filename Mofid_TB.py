@@ -93,7 +93,7 @@ logging.basicConfig(
     AWAITING_NEW_BROKERAGE_USERNAME,
 ) = range(24) # Adjusted range
 
-AWAITING_REAL_NAME, AWAITING_NATIONAL_ID, AWAITING_PHONE_NUMBER, AWAITING_EMAIL = range(24, 28)
+
 
 
 EMOJI = {
@@ -344,22 +344,28 @@ def is_subscription_active(user):
         print(f"User {user.get('telegram_id')} has no expiry_date or it's empty")
         return False
     try:
-        expiry_date = user["expiry_date"]
-        # اگر expiry_date یک رشته باشد، آن را به datetime تبدیل کن
-        if isinstance(expiry_date, str):
-            expiry_date = datetime.strptime(expiry_date, "%Y-%m-%d %H:%M:%S")
-        # اگر expiry_date یک شیء datetime باشد، نیازی به تبدیل نیست
-        elif isinstance(expiry_date, datetime):
-            pass
-        else:
-            raise TypeError(f"Invalid type for expiry_date: {type(expiry_date)}")
-        
+        expiry_date = user["expiry_date"]  # این یک شیء datetime است
         now = datetime.now()
         print(f"Current time: {now}, Expiry date: {expiry_date}")
         return now < expiry_date
     except Exception as e:
         print(f"Error checking subscription for user {user.get('telegram_id')}: {e}")
         return False
+
+def get_time_remaining(user):
+    if not user or "expiry_date" not in user or not user["expiry_date"]:
+        return "نامشخص"
+    try:
+        expiry_date = user["expiry_date"]  # این یک شیء datetime است
+        time_left = expiry_date - datetime.now()
+        if time_left.total_seconds() <= 0:
+            return "منقضی شده"
+        days = time_left.days
+        hours, rem = divmod(time_left.seconds, 3600)
+        minutes, _ = divmod(rem, 60)
+        return f"{days} روز، {hours} ساعت، {minutes} دقیقه"
+    except Exception:
+        return "نامشخص"
 
 def get_time_remaining(user):
     if not user or "expiry_date" not in user or not user["expiry_date"]: return "نامشخص"
@@ -861,7 +867,6 @@ async def get_brokerage_username(update: Update, context: ContextTypes.DEFAULT_T
     session.update_activity()
     brokerage_username_input = update.message.text.strip()
     
-    # brokerage_type is already set to "mofid" in session.user_data
     session.user_data["brokerage_username"] = brokerage_username_input 
     
     # Check for free trial uniqueness for this Mofid username
@@ -887,18 +892,20 @@ async def get_brokerage_username(update: Update, context: ContextTypes.DEFAULT_T
 
     session.add_log(f"نام کاربری کارگزاری مفید: {brokerage_username_input}", "info")
     
-    # Skip REGISTER_BROKERAGE_TYPE as it's fixed to Mofid
+    # Set brokerage type to Mofid
     session.user_data["brokerage_type"] = "mofid"
     session.add_log(f"نوع کارگزاری: مفید (ثابت)", "info")
 
+    # Ask for subscription type (free or premium)
     keyboard = [
         [InlineKeyboardButton(f"{EMOJI['token']} توکن فعال‌سازی پریمیوم دارم", callback_data="has_token_yes")],
         [InlineKeyboardButton(f"{EMOJI['free']} حساب رایگان (۳ روز) برای مفید", callback_data="has_token_no")],
     ]
-    await update.message.reply_text(f"{EMOJI['register']} آیا توکن فعال‌سازی پریمیوم برای ربات دارید؟", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        f"{EMOJI['register']} آیا توکن فعال‌سازی پریمیوم برای ربات دارید؟",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return REGISTER_HAS_TOKEN
-
-
 async def has_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -1299,21 +1306,35 @@ async def get_brokerage_password(update: Update, context: ContextTypes.DEFAULT_T
     session = context.user_data["session"]
     session.update_activity()
     password = update.message.text.strip()
-    session.credentials["password"] = password
-    session.user_data["brokerage_password"] = password
+    session.credentials["brokerage_password"] = password
+    session.add_log("رمز عبور کارگزاری مفید دریافت شد", "info")
+
+    user_data = session.user_data
+    if not user_data or not is_subscription_active(user_data):
+        await update.message.reply_text(f"{EMOJI['error']} اشتراک شما غیرفعال است. لطفا با /start شروع کنید.")
+        return await start(update, context)
+
+    username = user_data.get("brokerage_username")
+    if not username:
+        logger.error(f"No brokerage username found for user {session.user_id}")
+        await update.message.reply_text(f"{EMOJI['error']} خطای داخلی: نام کاربری کارگزاری یافت نشد.")
+        return ConversationHandler.END
+
+    is_limited, limit_message = check_login_rate_limit(session.user_id)
+    if is_limited:
+        await update.message.reply_text(limit_message)
+        return LOGIN_ENTER_BROKERAGE_PASSWORD
 
     loading_msg = await update.message.reply_text(f"{EMOJI['loading']} در حال ورود به کارگزاری مفید...")
 
-    login_result = await session.mofid_login(
-        username=session.user_data["brokerage_username"],
-        password=password
-    )
-
+    login_result = await session.mofid_login(username, password)
     if login_result["success"]:
+        reset_login_attempts(session.user_id)
+        session.add_log("ورود به کارگزاری مفید موفق بود", "success")
+        session.credentials["brokerage_password"] = password
         session.is_logged_in = True
-        session.add_log("ورود به مفید موفقیت‌آمیز بود", "success")
-        
-        # ذخیره رمز عبور در MySQL
+
+        # Save password to database
         connection = get_db_connection()
         try:
             cursor = connection.cursor()
@@ -1323,27 +1344,67 @@ async def get_brokerage_password(update: Update, context: ContextTypes.DEFAULT_T
                 WHERE telegram_id = %s
             """, (password, session.user_id))
             connection.commit()
+            session.add_log("رمز عبور در دیتابیس ذخیره شد", "success")
         except Error as e:
-            logger.error(f"Error updating brokerage password for user {session.user_id}: {e}")
+            logger.error(f"Error saving password for user {session.user_id}: {e}")
         finally:
             if connection.is_connected():
                 cursor.close()
                 connection.close()
 
-        # جمع‌آوری اطلاعات اضافی (مثلاً از کاربر بخواهیم وارد کند)
-        await loading_msg.edit_text(f"{EMOJI['success']} ورود موفقیت‌آمیز بود!\nلطفاً نام واقعی خود را وارد کنید:")
-        return AWAITING_REAL_NAME  # حالت جدید برای جمع‌آوری اطلاعات
+        # Retrieve and save user identity info after first successful login
+        user_db = find_user_by_telegram_id(session.user_id)
+        if not user_db.get("real_name") and not user_db.get("national_id"):  # Only if not already set
+            try:
+                user_info = session.bot.get_user_info()  # Assumed method from MofidBroker
+                connection = get_db_connection()
+                cursor = connection.cursor()
+                cursor.execute("""
+                    UPDATE users
+                    SET real_name = %s, national_id = %s, phone_number = %s, email = %s
+                    WHERE telegram_id = %s
+                """, (
+                    user_info.get("real_name"),
+                    user_info.get("national_id"),
+                    user_info.get("phone_number"),
+                    user_info.get("email"),
+                    session.user_id
+                ))
+                connection.commit()
+                session.add_log("اطلاعات هویتی کاربر از کارگزاری دریافت و ذخیره شد", "success")
+            except Exception as e:
+                logger.error(f"Error retrieving/saving user info for {session.user_id}: {e}")
+                session.add_log(f"خطا در دریافت/ذخیره اطلاعات هویتی: {str(e)}", "error")
+            finally:
+                if connection.is_connected():
+                    cursor.close()
+                    connection.close()
+
+        # Start inactivity check
+        if session.inactivity_timeout_task:
+            session.inactivity_timeout_task.cancel()
+        session.inactivity_timeout_task = asyncio.create_task(session.check_inactivity(context))
+
+        await loading_msg.edit_text(f"{EMOJI['success']} ورود به کارگزاری مفید موفقیت‌آمیز بود.")
+        await update.message.reply_text(
+            f"{EMOJI['trade']} لطفا نماد سهام را وارد کنید (مثال: وبملت):"
+        )
+        return STOCK_SELECTION
     else:
-        session.add_log(f"ورود ناموفق: {login_result['message']}", "error")
+        record_failed_login_attempt(session.user_id)
+        session.add_log(f"ورود به مفید ناموفق: {login_result['message']}", "error")
+        await loading_msg.edit_text(f"{EMOJI['error']} خطا: {login_result['message']}")
         keyboard = [
             [InlineKeyboardButton(f"{EMOJI['password']} تلاش مجدد", callback_data="retry_mofid_login_prompt")],
-            [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_main_action")],
+            [InlineKeyboardButton(f"{EMOJI['admin']} تماس با پشتیبانی", url="https://t.me/SarTraderBot_Support")],
+            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back_to_main_action")]
         ]
-        await loading_msg.edit_text(
-            f"{EMOJI['error']} {login_result['message']}",
+        await update.message.reply_text(
+            "لطفا یکی از گزینه‌ها را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return LOGIN_CONFIRM_DETAILS
+    
 
 async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     session = context.user_data["session"]
@@ -2778,67 +2839,8 @@ async def show_subscription_guide(update: Update, context: ContextTypes.DEFAULT_
 
 
 
-# توابع جدید
-async def get_real_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    session = context.user_data["session"]
-    session.update_activity()
-    session.user_data["real_name"] = update.message.text.strip()
-    await update.message.reply_text(f"{EMOJI['register']} لطفاً کد ملی خود را وارد کنید:")
-    return AWAITING_NATIONAL_ID
-
-async def get_national_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    session = context.user_data["session"]
-    session.update_activity()
-    session.user_data["national_id"] = update.message.text.strip()
-    await update.message.reply_text(f"{EMOJI['register']} لطفاً شماره تماس خود را وارد کنید:")
-    return AWAITING_PHONE_NUMBER
-
-async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    session = context.user_data["session"]
-    session.update_activity()
-    session.user_data["phone_number"] = update.message.text.strip()
-    await update.message.reply_text(f"{EMOJI['register']} لطفاً ایمیل خود را وارد کنید (اختیاری، در صورت عدم تمایل بنویسید 'خیر'):")
-    return AWAITING_EMAIL
-
-async def get_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    session = context.user_data["session"]
-    session.update_activity()
-    email = update.message.text.strip()
-    session.user_data["email"] = email if email.lower() != "خیر" else None
-
-    # ذخیره تمام اطلاعات در MySQL
-    connection = get_db_connection()
-    try:
-        cursor = connection.cursor()
-        cursor.execute("""
-            UPDATE users
-            SET real_name = %s, national_id = %s, phone_number = %s, email = %s
-            WHERE telegram_id = %s
-        """, (
-            session.user_data["real_name"],
-            session.user_data["national_id"],
-            session.user_data["phone_number"],
-            session.user_data["email"],
-            session.user_id
-        ))
-        connection.commit()
-        logger.info(f"Additional user info saved for {session.user_id}")
-    except Error as e:
-        logger.error(f"Error saving additional user info for {session.user_id}: {e}")
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
-
-    await update.message.reply_text(
-        f"{EMOJI['success']} اطلاعات شما ثبت شد!\nلطفاً نماد سهام را وارد کنید (مثال: وبملت):"
-    )
-    return STOCK_SELECTION
-
-
 def main() -> None:
-    bot_token = os.environ.get("MOFID_BOT_TOKEN") 
-  # Use a different token for the Mofid bot
+    bot_token = os.environ.get("MOFID_BOT_TOKEN")
     if not bot_token:
         logger.critical("MOFID_BOT_TOKEN not found in .env file. Exiting.")
         return
@@ -2883,10 +2885,6 @@ def main() -> None:
                 CallbackQueryHandler(confirm_login_details, pattern="^confirm_login_details_"),
             ],
             LOGIN_ENTER_BROKERAGE_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_brokerage_password)],
-            AWAITING_REAL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_real_name)],
-            AWAITING_NATIONAL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_national_id)],
-            AWAITING_PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
-            AWAITING_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_email)],
             STOCK_SELECTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, get_stock_symbol),
                 CallbackQueryHandler(change_stock_symbol_mofid, pattern="^change_stock_symbol_mofid$"),
@@ -2921,7 +2919,7 @@ def main() -> None:
                 CallbackQueryHandler(handle_post_order_choice, pattern="^post_order_(new_order_mofid|logout_mofid)$"),
                 CallbackQueryHandler(back_to_quantity_from_confirm, pattern="^back_to_quantity_from_confirm$"),
             ],
-            VIEW_DETAILS: [],  # Empty since we moved handling to POST_ORDER_CHOICE
+            VIEW_DETAILS: [],
             POST_ORDER_CHOICE: [
                 CallbackQueryHandler(handle_post_order_choice, pattern="^post_order_"),
                 CallbackQueryHandler(reshow_order_details, pattern="^reshow_details$") 
