@@ -1679,7 +1679,7 @@ async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         login_success_text_part = f"{EMOJI['success']} ورود به حساب کارگزاری مفید با موفقیت انجام شد!"
         settings_status_text_part = f"{EMOJI['success']} تنظیمات اولیه با موفقیت انجام شد." if settings_reset_successful else f"{EMOJI['warning']} بازنشانی تنظیمات اولیه ممکن است کامل انجام نشده باشد."
-        identity_status_text_part = f"{EMOJI['success']} اطلاعات هویتی بررسی شد." if identity_extraction_successful else f"{EMOJI['warning']} بررسی اطلاعات هویتی با مشکل مواجه شد یا اطلاعات ناقص است."
+        
         
         final_combined_status_text = f"{login_success_text_part}\n{settings_status_text_part}\n{identity_status_text_part}"
 
