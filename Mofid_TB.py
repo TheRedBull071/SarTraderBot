@@ -2466,7 +2466,8 @@ async def show_subscription_guide(update: Update, context: ContextTypes.DEFAULT_
 
 
 def main() -> None:
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")("MOFID_BOT_TOKEN")  # Use a different token for the Mofid bot
+    bot_token = os.environ.get("MOFID_BOT_TOKEN")
+  # Use a different token for the Mofid bot
     if not bot_token:
         logger.critical("MOFID_BOT_TOKEN not found in .env file. Exiting.")
         return
