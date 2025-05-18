@@ -220,13 +220,15 @@ async def admin_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     session = context.user_data.get("session", MofidBrokerSession(user_id))
     session.update_activity()
     context.user_data["session"] = session
+    logger.info(f"Admin login attempt by Telegram ID {user_id}")
 
     if is_admin_session_active(user_id):
+        logger.info(f"User {user_id} already has an active admin session. Redirecting to admin main menu.")
         return await admin_main_menu(update, context)
 
     await update.message.reply_text(f"{EMOJI['admin']} لطفاً رمز عبور ادمین را وارد کنید:")
+    logger.info(f"Prompted user {user_id} for admin password")
     return ADMIN_LOGIN
-
 async def verify_admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Verify admin password and show main menu."""
     user_id = update.effective_user.id
@@ -252,6 +254,7 @@ async def admin_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     session.update_activity()
 
     if not is_admin_session_active(user_id):
+        logger.warning(f"Admin session expired or invalid for user {user_id}")
         await update.message.reply_text(f"{EMOJI['error']} جلسه ادمین منقضی شده یا نامعتبر است. لطفاً دوباره با /admin وارد شوید.")
         return ConversationHandler.END
 
@@ -264,6 +267,7 @@ async def admin_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
     text = f"{EMOJI['admin']} *پنل مدیریت ربات*\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:"
     
+    logger.info(f"Displaying admin main menu for user {user_id}")
     if update.callback_query:
         await update.callback_query.edit_message_text(
             text=text,
@@ -645,54 +649,69 @@ USERS_FILE = os.path.join(DATA_DIR, "user.json")
 
 # --- User Data Management (Identical to telegramBotV7.py) ---
 def load_users_data():
-    # ایجاد دایrektori اگر وجود نداشته باشد
+    """Load user data from user.json with enhanced error handling."""
     os.makedirs(DATA_DIR, exist_ok=True)
     
     if not os.path.exists(USERS_FILE):
-        return {"users": [], "tokens": [], "activity_log": {}}
+        logger.warning(f"Users file {USERS_FILE} does not exist. Creating new empty structure.")
+        default_data = {"users": [], "tokens": [], "activity_log": {}}
+        save_users_data(default_data)  # Create the file immediately
+        return default_data
+
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if "users" not in data: data["users"] = []
-            if "tokens" not in data: data["tokens"] = []
-            if "activity_log" not in data: data["activity_log"] = {}
+            if not isinstance(data, dict):
+                logger.error(f"Invalid JSON structure in {USERS_FILE}. Resetting to default.")
+                return {"users": [], "tokens": [], "activity_log": {}}
+            if "users" not in data:
+                data["users"] = []
+            if "tokens" not in data:
+                data["tokens"] = []
+            if "activity_log" not in data:
+                data["activity_log"] = {}
+            logger.info(f"Successfully loaded user data from {USERS_FILE}")
             return data
-    except json.JSONDecodeError:
-        logger.error(f"Error decoding JSON from {USERS_FILE}.")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error in {USERS_FILE}: {e}. Returning default structure.")
         return {"users": [], "tokens": [], "activity_log": {}}
     except Exception as e:
-        logger.error(f"Error loading user data from {USERS_FILE}: {e}")
+        logger.error(f"Unexpected error loading {USERS_FILE}: {e}")
         return {"users": [], "tokens": [], "activity_log": {}}
 
 def save_users_data(data):
-    # ایجاد دایrektori اگر وجود نداشته باشد
+    """Save user data to user.json with robust locking and error handling."""
     os.makedirs(DATA_DIR, exist_ok=True)
     
     lock_file = f"{USERS_FILE}.lock"
     lock = FileLock(lock_file, timeout=10)
     max_retries = 3
     retry_delay = 2  # Seconds
+
     for attempt in range(max_retries):
         try:
             with lock:  # Acquire exclusive lock for writing
                 with open(USERS_FILE, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=4, ensure_ascii=False)
                 logger.info(f"User data successfully saved to {USERS_FILE}")
-                return  # Success, exit function
+                return
         except Timeout:
             logger.warning(f"Timeout acquiring lock for {USERS_FILE}, attempt {attempt + 1}/{max_retries}.")
             if attempt == max_retries - 1:
                 logger.error(f"Failed to acquire lock for {USERS_FILE} after {max_retries} attempts.")
-                raise Exception(f"Could not acquire lock for {USERS_FILE}. Please try again later.")
+                raise Exception(f"Could not save data to {USERS_FILE} due to lock timeout.")
             sleep(retry_delay)
+        except json.JSONEncodeError as e:
+            logger.error(f"JSON encode error saving to {USERS_FILE}: {e}")
+            raise
         except Exception as e:
-            logger.error(f"Error saving user data to {USERS_FILE}: {e}")
+            logger.error(f"Unexpected error saving to {USERS_FILE}: {e}")
             raise
         finally:
             try:
                 lock.release()
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Error releasing lock for {USERS_FILE}: {e}")
 
 def find_user_by_telegram_id(telegram_id):
     data = load_users_data()
