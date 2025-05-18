@@ -46,6 +46,10 @@ from telegram.ext import ContextTypes
 from logging import getLogger
 from typing import List
 
+import mysql.connector
+from mysql.connector import Error
+from mysql.connector import pooling
+
 
 logger = getLogger(__name__)
 
@@ -88,6 +92,8 @@ logging.basicConfig(
     AWAITING_NEW_BROKERAGE_USERNAME,
 ) = range(24) # Adjusted range
 
+AWAITING_REAL_NAME, AWAITING_NATIONAL_ID, AWAITING_PHONE_NUMBER, AWAITING_EMAIL = range(24, 28)
+
 
 EMOJI = {
     "success": "✅", "error": "❌", "warning": "⚠️", "info": "ℹ️",
@@ -111,81 +117,224 @@ MIN_SECONDS_BETWEEN_ORDERS = 10 # This can be adjusted based on Mofid's behavior
 
 
 
-#railway setting user.json file
-# مسیر volume در Railway
-DATA_DIR = "/app/data"
-USERS_FILE = os.path.join(DATA_DIR, "user.json")
+#Database connection details
+
+from mysql.connector import pooling
+
+dbconfig = {
+    "host": os.environ.get("MYSQLHOST"),
+    "port": int(os.environ.get("MYSQLPORT", 3306)),
+    "user": os.environ.get("MYSQLUSER"),
+    "password": os.environ.get("MYSQLPASSWORD"),
+    "database": os.environ.get("MYSQLDATABASE")
+}
+connection_pool = pooling.MySQLConnectionPool(pool_name="mypool", pool_size=5, **dbconfig)
+
+def get_db_connection():
+    try:
+        return connection_pool.get_connection()
+    except Error as e:
+        logger.error(f"Error getting connection from pool: {e}")
+        return None
+
 
 # --- User Data Management (Identical to telegramBotV7.py) ---
 def load_users_data():
-    # ایجاد دایrektori اگر وجود نداشته باشد
-    os.makedirs(DATA_DIR, exist_ok=True)
-    
-    if not os.path.exists(USERS_FILE):
+    connection = get_db_connection()
+    if not connection:
+        logger.error("Cannot load users data: No database connection")
         return {"users": [], "tokens": [], "activity_log": {}}
+
     try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if "users" not in data: data["users"] = []
-            if "tokens" not in data: data["tokens"] = []
-            if "activity_log" not in data: data["activity_log"] = {}
-            return data
-    except json.JSONDecodeError:
-        logger.error(f"Error decoding JSON from {USERS_FILE}.")
+        cursor = connection.cursor(dictionary=True)
+
+        # خواندن کاربران با تمام فیلدها
+        cursor.execute("""
+            SELECT telegram_id, telegram_name, registration_date, brokerage_type, full_name, 
+                   brokerage_username, subscription_type, token, expiry_date, brokerage_password, 
+                   real_name, national_id, phone_number, email 
+            FROM users
+        """)
+        users = cursor.fetchall()
+
+        # خواندن توکن‌ها
+        cursor.execute("SELECT * FROM tokens")
+        tokens = cursor.fetchall()
+
+        # خواندن لاگ‌های فعالیت
+        cursor.execute("""
+            SELECT telegram_id, login_attempts_count, first_attempt_timestamp, 
+                   cooldown_until, last_order_submission_timestamp 
+            FROM activity_log
+        """)
+        activity_logs = cursor.fetchall()
+        activity_log = {}
+        for log in activity_logs:
+            telegram_id = str(log["telegram_id"])
+            activity_log[telegram_id] = {
+                "login_attempts": {
+                    "count": log["login_attempts_count"],
+                    "first_attempt_timestamp": log["first_attempt_timestamp"].isoformat() if log["first_attempt_timestamp"] else None,
+                    "cooldown_until": log["cooldown_until"].isoformat() if log["cooldown_until"] else None
+                },
+                "last_order_submission_timestamp": log["last_order_submission_timestamp"].isoformat() if log["last_order_submission_timestamp"] else None
+            }
+
+        return {"users": users, "tokens": tokens, "activity_log": activity_log}
+
+    except Error as e:
+        logger.error(f"Error loading users data from MySQL: {e}")
         return {"users": [], "tokens": [], "activity_log": {}}
-    except Exception as e:
-        logger.error(f"Error loading user data from {USERS_FILE}: {e}")
-        return {"users": [], "tokens": [], "activity_log": {}}
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
 
 def save_users_data(data):
-    # ایجاد دایrektori اگر وجود نداشته باشد
-    os.makedirs(DATA_DIR, exist_ok=True)
-    
-    lock_file = f"{USERS_FILE}.lock"
-    lock = FileLock(lock_file, timeout=10)
-    max_retries = 3
-    retry_delay = 2  # Seconds
-    for attempt in range(max_retries):
-        try:
-            with lock:  # Acquire exclusive lock for writing
-                with open(USERS_FILE, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=4, ensure_ascii=False)
-                logger.info(f"User data successfully saved to {USERS_FILE}")
-                return  # Success, exit function
-        except Timeout:
-            logger.warning(f"Timeout acquiring lock for {USERS_FILE}, attempt {attempt + 1}/{max_retries}.")
-            if attempt == max_retries - 1:
-                logger.error(f"Failed to acquire lock for {USERS_FILE} after {max_retries} attempts.")
-                raise Exception(f"Could not acquire lock for {USERS_FILE}. Please try again later.")
-            sleep(retry_delay)
-        except Exception as e:
-            logger.error(f"Error saving user data to {USERS_FILE}: {e}")
-            raise
-        finally:
-            try:
-                lock.release()
-            except:
-                pass
+    connection = get_db_connection()
+    if not connection:
+        logger.error("Cannot save users data: No database connection")
+        raise Exception("Could not connect to MySQL database")
+
+    try:
+        cursor = connection.cursor()
+
+        # ذخیره یا به‌روزرسانی کاربران
+        for user in data.get("users", []):
+            cursor.execute("""
+                INSERT INTO users (telegram_id, telegram_name, registration_date, brokerage_type, full_name, 
+                                   brokerage_username, subscription_type, token, expiry_date, brokerage_password, 
+                                   real_name, national_id, phone_number, email)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    telegram_name = VALUES(telegram_name),
+                    registration_date = VALUES(registration_date),
+                    brokerage_type = VALUES(brokerage_type),
+                    full_name = VALUES(full_name),
+                    brokerage_username = VALUES(brokerage_username),
+                    subscription_type = VALUES(subscription_type),
+                    token = VALUES(token),
+                    expiry_date = VALUES(expiry_date),
+                    brokerage_password = VALUES(brokerage_password),
+                    real_name = VALUES(real_name),
+                    national_id = VALUES(national_id),
+                    phone_number = VALUES(phone_number),
+                    email = VALUES(email)
+            """, (
+                user.get("telegram_id"),
+                user.get("telegram_name"),
+                user.get("registration_date"),
+                user.get("brokerage_type"),
+                user.get("full_name"),
+                user.get("brokerage_username"),
+                user.get("subscription_type"),
+                user.get("token"),
+                user.get("expiry_date"),
+                user.get("brokerage_password"),
+                user.get("real_name"),
+                user.get("national_id"),
+                user.get("phone_number"),
+                user.get("email")
+            ))
+
+        # ذخیره یا به‌روزرسانی توکن‌ها
+        for token in data.get("tokens", []):
+            cursor.execute("""
+                INSERT INTO tokens (token, is_used, used_by_telegram_id, used_at, telegram_id, 
+                                    brokerage_username, subscription_type, expiry_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    is_used = VALUES(is_used),
+                    used_by_telegram_id = VALUES(used_by_telegram_id),
+                    used_at = VALUES(used_at),
+                    telegram_id = VALUES(telegram_id),
+                    brokerage_username = VALUES(brokerage_username),
+                    subscription_type = VALUES(subscription_type),
+                    expiry_date = VALUES(expiry_date)
+            """, (
+                token.get("token"),
+                token.get("is_used"),
+                token.get("used_by_telegram_id"),
+                token.get("used_at"),
+                token.get("telegram_id"),
+                token.get("brokerage_username"),
+                token.get("subscription_type"),
+                token.get("expiry_date")
+            ))
+
+        # ذخیره یا به‌روزرسانی لاگ‌های فعالیت
+        for telegram_id, activity in data.get("activity_log", {}).items():
+            login_attempts = activity.get("login_attempts", {})
+            cursor.execute("""
+                INSERT INTO activity_log (telegram_id, login_attempts_count, first_attempt_timestamp, 
+                                          cooldown_until, last_order_submission_timestamp)
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    login_attempts_count = VALUES(login_attempts_count),
+                    first_attempt_timestamp = VALUES(first_attempt_timestamp),
+                    cooldown_until = VALUES(cooldown_until),
+                    last_order_submission_timestamp = VALUES(last_order_submission_timestamp)
+            """, (
+                telegram_id,
+                login_attempts.get("count", 0),
+                login_attempts.get("first_attempt_timestamp"),
+                login_attempts.get("cooldown_until"),
+                activity.get("last_order_submission_timestamp")
+            ))
+
+        connection.commit()
+        logger.info("User data successfully saved to MySQL")
+    except Error as e:
+        logger.error(f"Error saving user data to MySQL: {e}")
+        raise
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 def find_user_by_telegram_id(telegram_id):
-    data = load_users_data()
-    telegram_id_str = str(telegram_id)
-    for user in data.get("users", []):
-        if str(user.get("telegram_id")) == telegram_id_str:
-            # Ensure this user is for Mofid if this bot is Mofid-exclusive
-            # However, registration flow will handle setting brokerage_type to 'mofid'
-            return user
-    return None
+    connection = get_db_connection()
+    if not connection:
+        logger.error("Cannot find user: No database connection")
+        return None
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT * FROM users WHERE telegram_id = %s
+        """, (telegram_id,))
+        user = cursor.fetchone()
+        return user
+    except Error as e:
+        logger.error(f"Error finding user by telegram_id {telegram_id}: {e}")
+        return None
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 def is_brokerage_username_in_use(brokerage_username_to_check: str, brokerage_type_to_check: str = "mofid") -> bool:
-    """Checks if a brokerage username for a specific brokerage type is already associated with any user."""
-    data = load_users_data()
-    for user in data.get("users", []):
-        if user.get("brokerage_username", "").lower() == brokerage_username_to_check.lower() and \
-           user.get("brokerage_type") == brokerage_type_to_check:
-            logger.info(f"Brokerage username '{brokerage_username_to_check}' for '{brokerage_type_to_check}' found in use by Telegram ID: {user.get('telegram_id')}")
-            return True
-    return False
+    connection = get_db_connection()
+    if not connection:
+        logger.error("Cannot check brokerage username: No database connection")
+        return False
+
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM users
+            WHERE LOWER(brokerage_username) = LOWER(%s) AND brokerage_type = %s
+        """, (brokerage_username_to_check, brokerage_type_to_check))
+        count = cursor.fetchone()[0]
+        return count > 0
+    except Error as e:
+        logger.error(f"Error checking brokerage username: {e}")
+        return False
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 def is_subscription_active(user):
     if not user or "expiry_date" not in user or not user["expiry_date"]:
@@ -212,39 +361,46 @@ def get_time_remaining(user):
     except (ValueError, TypeError): return "نامشخص"
 
 def validate_premium_token(token_string, telegram_id, brokerage_username_for_validation):
-    data = load_users_data()
-    for token_data in data.get("tokens", []):
-        if token_data.get("token") == token_string:
-            if token_data.get("is_used", False):
-                logger.warning(f"Attempt to use already used token {token_string} by Telegram ID {telegram_id}.")
-                return {"valid": False, "message": "این توکن قبلا استفاده شده است."}
+    connection = get_db_connection()
+    if not connection:
+        logger.error("Cannot validate token: No database connection")
+        return {"valid": False, "message": "خطای اتصال به پایگاه داده"}
 
-            token_bound_telegram_id = token_data.get("telegram_id")
-            if token_bound_telegram_id and str(token_bound_telegram_id) != str(telegram_id):
-                 logger.warning(f"Token {token_string} (for Telegram ID {token_bound_telegram_id}) attempted by {telegram_id}")
-                 return {"valid": False, "message": "این توکن برای شناسه تلگرام شما صادر نشده است."}
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM tokens WHERE token = %s", (token_string,))
+        token_data = cursor.fetchone()
 
-            token_bound_brokerage_username = token_data.get("brokerage_username")
-            # For Mofid bot, ensure token (if bound to brokerage_username) is for mofid type.
-            # This check is more relevant if users.json is shared and tokens can be generic.
-            # For simplicity, we assume token validation is primarily on string and used status.
-            # Brokerage username matching for token is good.
-            if token_bound_brokerage_username and brokerage_username_for_validation.lower() != token_bound_brokerage_username.lower():
-                 logger.warning(f"Token {token_string} (for brokerage {token_bound_brokerage_username}) attempted with brokerage {brokerage_username_for_validation} by {telegram_id}")
-                 return {"valid": False, "message": f"این توکن برای نام کاربری کارگزاری '{brokerage_username_for_validation}' معتبر نیست. توکن برای کارگزاری '{token_bound_brokerage_username}' صادر شده است."}
+        if not token_data:
+            return {"valid": False, "message": "توکن نامعتبر یا پیدا نشد."}
 
-            if "expiry_date" in token_data and token_data["expiry_date"]:
-                try:
-                    token_expiry_date = datetime.strptime(token_data["expiry_date"], "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() >= token_expiry_date:
-                        logger.warning(f"Attempted to use expired token (token's own expiry): {token_string}")
-                        return {"valid": False, "message": "توکن منقضی شده است."}
-                except ValueError:
-                     logger.error(f"Invalid expiry date format for token {token_string}: {token_data.get('expiry_date')}")
-                     pass
+        if token_data.get("is_used", False):
+            logger.warning(f"Attempt to use already used token {token_string} by Telegram ID {telegram_id}")
+            return {"valid": False, "message": "این توکن قبلا استفاده شده است."}
 
-            return {"valid": True, "token_data": token_data}
-    return {"valid": False, "message": "توکن نامعتبر یا پیدا نشد."}
+        token_bound_telegram_id = token_data.get("telegram_id")
+        if token_bound_telegram_id and str(token_bound_telegram_id) != str(telegram_id):
+            logger.warning(f"Token {token_string} (for Telegram ID {token_bound_telegram_id}) attempted by {telegram_id}")
+            return {"valid": False, "message": "این توکن برای شناسه تلگرام شما صادر نشده است."}
+
+        token_bound_brokerage_username = token_data.get("brokerage_username")
+        if token_bound_brokerage_username and brokerage_username_for_validation.lower() != token_bound_brokerage_username.lower():
+            logger.warning(f"Token {token_string} (for brokerage {token_bound_brokerage_username}) attempted with brokerage {brokerage_username_for_validation} by {telegram_id}")
+            return {"valid": False, "message": f"این توکن برای نام کاربری کارگزاری '{brokerage_username_for_validation}' معتبر نیست."}
+
+        if "expiry_date" in token_data and token_data["expiry_date"]:
+            if datetime.now() >= token_data["expiry_date"]:
+                logger.warning(f"Attempted to use expired token: {token_string}")
+                return {"valid": False, "message": "توکن منقضی شده است."}
+
+        return {"valid": True, "token_data": token_data}
+    except Error as e:
+        logger.error(f"Error validating token {token_string}: {e}")
+        return {"valid": False, "message": "خطا در بررسی توکن"}
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 def calculate_premium_expiry(subscription_type):
     now = datetime.now()
@@ -272,37 +428,77 @@ def check_login_rate_limit(user_id: int) -> tuple[bool, str]:
 def record_failed_login_attempt(user_id: int):
     user_id_str = str(user_id)
     now = datetime.now()
-    data = load_users_data() 
-    user_activity = data.setdefault("activity_log", {}).setdefault(user_id_str, {})
-    login_attempts_data = user_activity.setdefault("login_attempts", {"count": 0, "first_attempt_timestamp": None, "cooldown_until": None})
-    
-    first_attempt_ts_str = login_attempts_data.get("first_attempt_timestamp")
-    if first_attempt_ts_str:
-        first_attempt_ts = datetime.fromisoformat(first_attempt_ts_str)
-        if now - first_attempt_ts > timedelta(minutes=LOGIN_ATTEMPT_WINDOW_MINUTES):
-            login_attempts_data["count"] = 1
-            login_attempts_data["first_attempt_timestamp"] = now.isoformat()
-        else:
-            login_attempts_data["count"] += 1
-    else:
-        login_attempts_data["count"] = 1
-        login_attempts_data["first_attempt_timestamp"] = now.isoformat()
+    connection = get_db_connection()
+    if not connection:
+        logger.error("Cannot record failed login attempt: No database connection")
+        return
 
-    if login_attempts_data["count"] >= MAX_LOGIN_ATTEMPTS:
-        cooldown_end_time = now + timedelta(minutes=LOGIN_COOLDOWN_MINUTES)
-        login_attempts_data["cooldown_until"] = cooldown_end_time.isoformat()
-        login_attempts_data["count"] = 0
-        login_attempts_data["first_attempt_timestamp"] = None
-        logger.warning(f"User {user_id_str} rate-limited for login. Cooldown: {cooldown_end_time.isoformat()}")
-    save_users_data(data)
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            SELECT login_attempts_count, first_attempt_timestamp
+            FROM activity_log
+            WHERE telegram_id = %s
+        """, (user_id_str,))
+        result = cursor.fetchone()
+
+        if result:
+            count, first_attempt_ts = result
+            if first_attempt_ts and now - first_attempt_ts < timedelta(minutes=LOGIN_ATTEMPT_WINDOW_MINUTES):
+                count += 1
+            else:
+                count = 1
+                first_attempt_ts = now
+        else:
+            count = 1
+            first_attempt_ts = now
+
+        cooldown_until = None
+        if count >= MAX_LOGIN_ATTEMPTS:
+            cooldown_until = now + timedelta(minutes=LOGIN_COOLDOWN_MINUTES)
+            count = 0
+            first_attempt_ts = None
+            logger.warning(f"User {user_id_str} rate-limited for login. Cooldown until: {cooldown_until}")
+
+        cursor.execute("""
+            INSERT INTO activity_log (telegram_id, login_attempts_count, first_attempt_timestamp, cooldown_until)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                login_attempts_count = %s,
+                first_attempt_timestamp = %s,
+                cooldown_until = %s
+        """, (user_id_str, count, first_attempt_ts, cooldown_until, count, first_attempt_ts, cooldown_until))
+
+        connection.commit()
+    except Error as e:
+        logger.error(f"Error recording failed login attempt for user {user_id}: {e}")
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 def reset_login_attempts(user_id: int):
     user_id_str = str(user_id)
-    data = load_users_data()
-    if user_id_str in data.get("activity_log", {}) and "login_attempts" in data["activity_log"][user_id_str]:
-        data["activity_log"][user_id_str]["login_attempts"] = {"count": 0, "first_attempt_timestamp": None, "cooldown_until": None}
-        save_users_data(data)
-        logger.info(f"Login attempts reset for user {user_id_str}.")
+    connection = get_db_connection()
+    if not connection:
+        logger.error("Cannot reset login attempts: No database connection")
+        return
+
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            UPDATE activity_log
+            SET login_attempts_count = 0, first_attempt_timestamp = NULL, cooldown_until = NULL
+            WHERE telegram_id = %s
+        """, (user_id_str,))
+        connection.commit()
+        logger.info(f"Login attempts reset for user {user_id_str}")
+    except Error as e:
+        logger.error(f"Error resetting login attempts for user {user_id}: {e}")
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 def check_order_submission_rate_limit(user_id: int) -> tuple[bool, str]:
     user_id_str = str(user_id)
@@ -318,11 +514,26 @@ def check_order_submission_rate_limit(user_id: int) -> tuple[bool, str]:
 
 def record_order_submission(user_id: int):
     user_id_str = str(user_id)
-    now_iso = datetime.now().isoformat()
-    data = load_users_data()
-    user_activity = data.setdefault("activity_log", {}).setdefault(user_id_str, {})
-    user_activity["last_order_submission_timestamp"] = now_iso
-    save_users_data(data)
+    now = datetime.now()
+    connection = get_db_connection()
+    if not connection:
+        logger.error("Cannot record order submission: No database connection")
+        return
+
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            INSERT INTO activity_log (telegram_id, last_order_submission_timestamp)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE last_order_submission_timestamp = %s
+        """, (user_id_str, now, now))
+        connection.commit()
+    except Error as e:
+        logger.error(f"Error recording order submission for user {user_id}: {e}")
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
 
 
 class MofidBrokerSession:
@@ -1073,17 +1284,52 @@ async def confirm_login_details(update: Update, context: ContextTypes.DEFAULT_TY
 async def get_brokerage_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     session = context.user_data["session"]
     session.update_activity()
-    user_data = session.user_data
+    password = update.message.text.strip()
+    session.credentials["password"] = password
+    session.user_data["brokerage_password"] = password
 
-    if not user_data or not is_subscription_active(user_data) or user_data.get("brokerage_type") != "mofid":
-        await update.message.reply_text(f"{EMOJI['error']} دسترسی غیرمجاز.")
-        return await start(update, context)
+    loading_msg = await update.message.reply_text(f"{EMOJI['loading']} در حال ورود به کارگزاری مفید...")
 
-    session.credentials["brokerage_password"] = update.message.text # Store password
-    session.add_log("رمز عبور کارگزاری مفید دریافت شد", "info")
-    
-    # Directly attempt login
-    return await attempt_mofid_login(update, context)
+    login_result = await session.mofid_login(
+        username=session.user_data["brokerage_username"],
+        password=password
+    )
+
+    if login_result["success"]:
+        session.is_logged_in = True
+        session.add_log("ورود به مفید موفقیت‌آمیز بود", "success")
+        
+        # ذخیره رمز عبور در MySQL
+        connection = get_db_connection()
+        try:
+            cursor = connection.cursor()
+            cursor.execute("""
+                UPDATE users
+                SET brokerage_password = %s
+                WHERE telegram_id = %s
+            """, (password, session.user_id))
+            connection.commit()
+        except Error as e:
+            logger.error(f"Error updating brokerage password for user {session.user_id}: {e}")
+        finally:
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
+
+        # جمع‌آوری اطلاعات اضافی (مثلاً از کاربر بخواهیم وارد کند)
+        await loading_msg.edit_text(f"{EMOJI['success']} ورود موفقیت‌آمیز بود!\nلطفاً نام واقعی خود را وارد کنید:")
+        return AWAITING_REAL_NAME  # حالت جدید برای جمع‌آوری اطلاعات
+    else:
+        session.add_log(f"ورود ناموفق: {login_result['message']}", "error")
+        keyboard = [
+            [InlineKeyboardButton(f"{EMOJI['password']} تلاش مجدد", callback_data="retry_mofid_login_prompt")],
+            [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_main_action")],
+        ]
+        await loading_msg.edit_text(
+            f"{EMOJI['error']} {login_result['message']}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return LOGIN_CONFIRM_DETAILS
 
 async def attempt_mofid_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     session = context.user_data["session"]
@@ -2516,21 +2762,72 @@ async def show_subscription_guide(update: Update, context: ContextTypes.DEFAULT_
     return EXPIRED_ACCOUNT_OPTIONS
 
 
+
+
+# توابع جدید
+async def get_real_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    session = context.user_data["session"]
+    session.update_activity()
+    session.user_data["real_name"] = update.message.text.strip()
+    await update.message.reply_text(f"{EMOJI['register']} لطفاً کد ملی خود را وارد کنید:")
+    return AWAITING_NATIONAL_ID
+
+async def get_national_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    session = context.user_data["session"]
+    session.update_activity()
+    session.user_data["national_id"] = update.message.text.strip()
+    await update.message.reply_text(f"{EMOJI['register']} لطفاً شماره تماس خود را وارد کنید:")
+    return AWAITING_PHONE_NUMBER
+
+async def get_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    session = context.user_data["session"]
+    session.update_activity()
+    session.user_data["phone_number"] = update.message.text.strip()
+    await update.message.reply_text(f"{EMOJI['register']} لطفاً ایمیل خود را وارد کنید (اختیاری، در صورت عدم تمایل بنویسید 'خیر'):")
+    return AWAITING_EMAIL
+
+async def get_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    session = context.user_data["session"]
+    session.update_activity()
+    email = update.message.text.strip()
+    session.user_data["email"] = email if email.lower() != "خیر" else None
+
+    # ذخیره تمام اطلاعات در MySQL
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            UPDATE users
+            SET real_name = %s, national_id = %s, phone_number = %s, email = %s
+            WHERE telegram_id = %s
+        """, (
+            session.user_data["real_name"],
+            session.user_data["national_id"],
+            session.user_data["phone_number"],
+            session.user_data["email"],
+            session.user_id
+        ))
+        connection.commit()
+        logger.info(f"Additional user info saved for {session.user_id}")
+    except Error as e:
+        logger.error(f"Error saving additional user info for {session.user_id}: {e}")
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
+    await update.message.reply_text(
+        f"{EMOJI['success']} اطلاعات شما ثبت شد!\nلطفاً نماد سهام را وارد کنید (مثال: وبملت):"
+    )
+    return STOCK_SELECTION
+
+
 def main() -> None:
     bot_token = os.environ.get("MOFID_BOT_TOKEN") 
   # Use a different token for the Mofid bot
     if not bot_token:
         logger.critical("MOFID_BOT_TOKEN not found in .env file. Exiting.")
         return
-
-    # Ensure activity_log is initialized in users.json
-    if not os.path.exists(USERS_FILE):
-        save_users_data({"users": [], "tokens": [], "activity_log": {}})
-    else:
-        data = load_users_data()
-        if "activity_log" not in data:
-            data["activity_log"] = {}
-            save_users_data(data)
 
     application = Application.builder().token(bot_token).build()
     
@@ -2572,6 +2869,10 @@ def main() -> None:
                 CallbackQueryHandler(confirm_login_details, pattern="^confirm_login_details_"),
             ],
             LOGIN_ENTER_BROKERAGE_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_brokerage_password)],
+            AWAITING_REAL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_real_name)],
+            AWAITING_NATIONAL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_national_id)],
+            AWAITING_PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone_number)],
+            AWAITING_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_email)],
             STOCK_SELECTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, get_stock_symbol),
                 CallbackQueryHandler(change_stock_symbol_mofid, pattern="^change_stock_symbol_mofid$"),
