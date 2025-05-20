@@ -675,7 +675,7 @@ class MofidBrokerSession:
     async def mofid_place_order(self, stock_name, action, quantity, price_option, custom_price=None, send_option="now", scheduled_time_str=None):
         """Wrapper for MofidBroker's place_order."""
         if not self.is_logged_in:
-            return {"success": False, "message": "ابتدا باید وارد حساب کارگزاری شوید."}
+            return {"success": False, "message": "ابتدا باید وارد حساب کارگزاری شوید.", "submission_logs": [], "click_count": 0}
 
         # Parameter mapping
         mofid_action = "buy" if action == "خرید" else "sell"
@@ -691,7 +691,8 @@ class MofidBrokerSession:
 
         order_submission_logs = []
         try:
-            result = self.bot.place_order(
+            # result_from_broker شامل click_count خواهد بود
+            result_from_broker = self.bot.place_order(
                 action=mofid_action,
                 quantity=quantity,
                 price_option=mofid_price_option,
@@ -699,25 +700,30 @@ class MofidBrokerSession:
                 send_option=mofid_send_option,
                 scheduled_time_str=scheduled_time_str
             )
-            if result["success"]:
+
+            # استخراج click_count و سایر موارد لازم
+            click_count_val = result_from_broker.get("click_count", 0)
+            submission_logs_val = result_from_broker.get("submission_logs", [])
+
+            if result_from_broker["success"]:
                 final_message = "سفارش با موفقیت در هسته معاملات ثبت گردید."
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 order_submission_logs.append(f"{current_time}: نتیجه: {final_message}")
-                order_submission_logs.extend(result.get("submission_logs", []))
-                return {"success": True, "message": final_message, "submission_logs": order_submission_logs}
+                order_submission_logs.extend(submission_logs_val)
+                return {"success": True, "message": final_message, "submission_logs": order_submission_logs, "click_count": click_count_val}
             else:
                 final_message = "ارسال سفارش ناموفق بود."
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 order_submission_logs.append(f"{current_time}: نتیجه: {final_message}")
-                order_submission_logs.extend(result.get("submission_logs", []))
-                return {"success": False, "message": final_message, "submission_logs": order_submission_logs}
+                order_submission_logs.extend(submission_logs_val)
+                return {"success": False, "message": final_message, "submission_logs": order_submission_logs, "click_count": click_count_val}
 
         except Exception as e:
             logger.error(f"Mofid place_order error for user {self.user_id}: {e}")
             error_message = f"خطا در ارسال سفارش به مفید: {str(e)}"
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             order_submission_logs.append(f"{current_time}: خطا: {error_message}")
-            return {"success": False, "message": error_message, "submission_logs": order_submission_logs}
+            return {"success": False, "message": error_message, "submission_logs": order_submission_logs, "click_count": 0}
 
 async def schedule_order_detail_cleanup(context: ContextTypes.DEFAULT_TYPE, session: MofidBrokerSession, chat_id: int):
     """Schedules the cleanup of order detail messages, excluding the final summary message."""
@@ -2334,18 +2340,19 @@ async def execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     loading_text = f"{EMOJI['loading']} در حال آماده سازی برای ارسال سفارش به مفید..."
     if order.get('scheduled_time_str_for_module') and order['send_method'] != "فوری":
         loading_text = (
-            f"{EMOJI['clock']} سفارش برای نماد *{order['stock']}*   در زمان *{order['scheduled_time_str_for_module']}* تنظیم شد.\n"
+            f"{EMOJI['clock']} سفارش برای نماد *{order['stock']}* در زمان *{order['scheduled_time_str_for_module']}* تنظیم شد.\n"
             f"ربات تا آن زمان منتظر مانده و سپس اقدام به ارسال سفارش خواهد کرد."
         )
     await_query_message = await query.edit_message_text(text=loading_text, parse_mode="Markdown")
 
+    # Call the mofid_place_order method which internally calls the broker's place_order
     result = await session.mofid_place_order(
         stock_name=order['stock'],
         action=order['action'],
         quantity=order['quantity'],
-        price_option=order['price_choice'],
+        price_option=order['price_choice'], # This should be 'max', 'min', or 'custom'
         custom_price=order.get('custom_price'),
-        send_option=order['send_method'],
+        send_option=order['send_method'], # This should be 'now' or 'schedule'
         scheduled_time_str=order.get('scheduled_time_str_for_module')
     )
     
@@ -2362,21 +2369,17 @@ async def execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     # Clear scheduled order details and active orders after execution
     if order.get("stock") in session.active_orders:
         session.active_orders.remove(order["stock"])
+    # Clear these specific keys from order_details if they exist
     session.order_details.pop("scheduled_time_str_for_module", None)
-    session.order_details.pop("send_method", None)
+    # session.order_details.pop("send_method", None) # Keep send_method if it's used elsewhere, or clear if only for this order
     logger.info(f"Cleared scheduled order details for user {session.user_id} after execution.")
 
-    session.first_successful_order_time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-    if result.get("submission_logs"):
-        for log in result["submission_logs"]:
-            if ": نتیجه:" in log:
-                try:
-                    time_str = log.split(":")[0:2]
-                    time_str = ":".join(time_str).strip()
-                    session.first_successful_order_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S.%f").strftime('%H:%M:%S.%f')[:-3]
-                    break
-                except Exception:
-                    pass
+    # Attempt to get a more precise time from submission_logs if available
+    session.first_successful_order_time = datetime.now().strftime('%H:%M:%S.%f')[:-3] # Default to now
+    # The result from mofid_place_order in MofidBrokerSession already processes submission_logs from the broker module
+    # So, result.get("submission_logs") here are the logs *after* MofidBrokerSession's wrapper.
+    # We need to ensure that the `click_count` is passed up from the MofidBroker module through MofidBrokerSession.
+    # Let's assume `result` from `session.mofid_place_order` now also contains `click_count`.
 
     execution_details_list = []
     summary_text = f"""
@@ -2390,23 +2393,60 @@ async def execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 """
     if scheduled_time_for_summary:
         summary_text += f"🕒 *زمان برنامه‌ریزی شده:* {scheduled_time_for_summary}\n"
-    summary_text += f"✅ *زمان تقریبی پردازش:* {session.first_successful_order_time}\n"
+    
+    # Try to get a more precise time from submission_logs if available
+    # This part might need adjustment based on how MofidBrokerSession formats its logs
+    processed_submission_logs = result.get("submission_logs", [])
+    if processed_submission_logs:
+        # Example: Find a line indicating success or start of burst if possible
+        # For now, using the default time or a time from a specific log entry
+        for log_line in processed_submission_logs:
+            if ": نتیجه:" in log_line or "شروع ارسال سریع" in log_line: # Example keywords
+                try:
+                    # Attempt to parse time from log_line
+                    # This is highly dependent on your log format
+                    time_part_match = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})", log_line)
+                    if not time_part_match: # Try HH:MM:SS.sss format
+                        time_part_match = re.search(r"(\d{2}:\d{2}:\d{2}\.\d{3})", log_line)
+                    
+                    if time_part_match:
+                        time_str_from_log = time_part_match.group(1)
+                        # Ensure it's a full datetime string if only time was matched
+                        if len(time_str_from_log) < 12: # Likely only HH:MM:SS.sss
+                           session.first_successful_order_time = f"{datetime.now().strftime('%Y-%m-%d')} {time_str_from_log}"
+                        else:
+                           session.first_successful_order_time = time_str_from_log
+                        break 
+                except Exception:
+                    pass # Keep default time if parsing fails
+    
+    summary_text += f"✅ *زمان تقریبی پردازش/شروع ارسال:* {session.first_successful_order_time}\n"
+
 
     if result["success"]:
         session.add_log(f"سفارش مفید ارسال شد: {result.get('message', 'موفق')}", "success")
         summary_text += f"\n{EMOJI['success']} *وضعیت کلی:* {result.get('message', 'سفارش با موفقیت پردازش شد.')}. \n {EMOJI['warning']} لطفا حتما به حساب کاربری خود در کارگزاری مراجعه کرده و از ثبت صحیح سفارش اطمینان حاصل کنید. {EMOJI['warning']}"
     else:
         session.add_log(f"خطا در ارسال سفارش مفید: {result.get('message', 'ناموفق')}", "error")
-        session.update_activity()
+        session.update_activity() # Ensure timer is reset even on failure here
         summary_text += f"\n{EMOJI['error']} *وضعیت کلی:* {result.get('message', 'خطا در پردازش سفارش.')}. \n {EMOJI['warning']} لطفا حتما به حساب کاربری خود در کارگزاری مراجعه کرده و از عدم ثبت  سفارش اطمینان حاصل کنید. {EMOJI['warning']}"
 
-    # Add number of log entries to summary
-    log_count = len(result.get("submission_logs", []))
-    summary_text += f"\n📜 * تعداد کل سفارش های ارسالی در 20 ثانیه : * {log_count}"
+    # --- THIS IS THE CORRECTED PART ---
+    # Get the actual click count from the result of place_order
+    # Ensure mofid_module_DB.py's place_order returns 'click_count'
+    # and MofidBrokerSession's mofid_place_order wrapper passes it through.
+    actual_click_count = result.get("click_count", 0) # Default to 0 if not found
+    if actual_click_count > 0 :
+        summary_text += f"\n📜 *تعداد کل سفارشات ارسالی در 20 ثانیه:* {actual_click_count}"
+    else: # Fallback if click_count is not available for some reason, show log count
+        log_count = len(processed_submission_logs)
+        summary_text += f"\n📜 *تعداد لاگ‌های جزئیات ارسال:* {log_count}"
+    # --- END OF CORRECTION ---
 
-    execution_details_list.append(summary_text)
-    if result.get("submission_logs"):
-        execution_details_list.extend(result["submission_logs"])  # Add all submission logs
+
+    execution_details_list.append(summary_text) # Add the summary itself as the first "detail"
+    if processed_submission_logs:
+        execution_details_list.extend(processed_submission_logs)
 
     session.order_details["execution_details"] = execution_details_list
 
@@ -2417,7 +2457,7 @@ async def execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     ]
     summary_msg = await context.bot.send_message(
         chat_id=session.user_id,
-        text=f"{summary_text}\n\nبرای ادامه یکی از گزینه‌های زیر را انتخاب کنید:",
+        text=f"{summary_text}\n\nبرای ادامه یکی از گزینه‌های زیر را انتخاب کنید:", # Send the summary text
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )

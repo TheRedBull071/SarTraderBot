@@ -11,17 +11,19 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 
-tehran_tz = pytz.timezone('Asia/Tehran')
 
-# Set up logging for debugging and tracking
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 class MofidBroker:
     def __init__(self):
-        self.driver = None
+        self.driver = None # باید توسط setup_driver مقداردهی شود
         self.logs = []
         self.submission_logs = []
+        # این بخش برای اجرای مستقل کد اضافه شده، در کد اصلی شما نیاز نیست
+        global logger, tehran_tz
+        logger = logging.getLogger(__name__)
+        if not logger.handlers:
+            logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        tehran_tz = pytz.timezone('Asia/Tehran')
 
     def setup_driver(self, headless=True):  # Changed default to True for headless
         """Initialize and return a Chrome WebDriver with optimized settings for headless operation."""
@@ -250,12 +252,13 @@ class MofidBroker:
 
     def place_order(self, action, quantity, price_option, custom_price=None, send_option="now", scheduled_time_str=None):
         """
-        Handle buy/sell action, quantity, price selection, scheduling, 
-        and super-fast burst submit with 100ms rate limiting.
+        Handle buy/sell action, quantity, price selection, scheduling,
+        and ultra-fast burst submit with no artificial rate limiting.
+        Logging and message checking are minimized during the burst loop for maximum speed.
         """
         try:
-            # اگر می‌خواهید لاگ‌ها برای هر بار فراخوانی place_order جدا باشند، آنها را اینجا پاک کنید
-            # self.logs = [] 
+            # پاک کردن لاگ‌های قبلی برای این فراخوانی خاص (اختیاری)
+            # self.logs = []
             # self.submission_logs = []
             self.add_log(f"شروع فرآیند سفارش: {action.capitalize()} برای تعداد {quantity}", "info")
 
@@ -265,6 +268,7 @@ class MofidBroker:
                 raise ValueError("Action must be 'buy' or 'sell'")
 
             logger.info(f"Locating {action} button")
+            # انتخابگر دکمه خرید یا فروش
             button_selector = f"button[data-cy='order-{action}-btn']"
             try:
                 action_button = self.wait_for_element(By.CSS_SELECTOR, button_selector)
@@ -272,13 +276,14 @@ class MofidBroker:
                 self.add_log(f"انتخابگر اصلی دکمه {action} ناموفق بود، تلاش با انتخابگر جایگزین.", "warning")
                 button_selector_fallback = f"button.btn-outline-{'success' if action == 'buy' else 'danger'}"
                 action_button = self.wait_for_element(By.CSS_SELECTOR, button_selector_fallback)
-                button_selector = button_selector_fallback 
+                button_selector = button_selector_fallback
 
             WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, button_selector)))
             action_button.click()
             logger.info(f"{action.capitalize()} button clicked")
             self.add_log(f"دکمه {action.capitalize()} کلیک شد", "info")
 
+            # اعتبارسنجی و وارد کردن تعداد
             try:
                 quantity = int(quantity)
                 if quantity <= 0:
@@ -296,7 +301,7 @@ class MofidBroker:
             ]
             for idx, selector in enumerate(selectors):
                 try:
-                    quantity_input = self.wait_for_element(By.CSS_SELECTOR, selector, timeout=2)
+                    quantity_input = self.wait_for_element(By.CSS_SELECTOR, selector, timeout=2) # کاهش timeout برای سرعت
                     self.add_log(f"فیلد تعداد با سلکتور '{selector}' پیدا شد", "info")
                     break
                 except TimeoutException:
@@ -308,14 +313,15 @@ class MofidBroker:
 
             try:
                 quantity_input.clear()
-                time.sleep(0.1) # انتظار برای اطمینان از پاک شدن
+                # time.sleep(0.1) # حذف یا کاهش شدید تاخیر
                 quantity_input.send_keys(str(quantity))
-                time.sleep(0.2) # انتظار برای پردازش ورودی
+                # time.sleep(0.2) # حذف یا کاهش شدید تاخیر
                 self.add_log(f"تعداد {quantity} با موفقیت وارد شد", "info")
             except Exception as e:
                 self.add_log(f"خطا در وارد کردن تعداد: {str(e)}", "error")
                 raise
 
+            # انتخاب گزینه قیمت
             price_option = price_option.strip().lower()
             if price_option not in ['max', 'min', 'custom']:
                 self.add_log(f"گزینه قیمت نامعتبر: {price_option}", "error")
@@ -348,14 +354,15 @@ class MofidBroker:
                     price_input = self.wait_for_element(By.CSS_SELECTOR, price_input_selector)
                 except TimeoutException:
                     self.add_log(f"انتخابگر اصلی قیمت '{price_input_selector}' ناموفق بود، تلاش با جایگزین.", "warning")
-                    price_input_selector = "input[id*='price'], input[data-cy*='price']"
+                    price_input_selector = "input[id*='price'], input[data-cy*='price']" # انتخابگر جایگزین
                     price_input = self.wait_for_element(By.CSS_SELECTOR, price_input_selector)
 
                 price_input.clear()
-                time.sleep(0.1)
+                # time.sleep(0.1) # حذف یا کاهش
                 price_input.send_keys(str(custom_price))
                 self.add_log(f"قیمت سفارشی '{custom_price}' وارد شد", "info")
 
+            # مدیریت زمان ارسال
             send_option = send_option.strip().lower()
             if send_option not in ['now', 'schedule']:
                 self.add_log(f"گزینه ارسال نامعتبر: {send_option}", "error")
@@ -368,9 +375,13 @@ class MofidBroker:
                 
                 now_system = datetime.now(tehran_tz)
                 try:
-                    scheduled_time_obj = datetime.strptime(scheduled_time_str, "%H:%M:%S.%f").time()
+                    # پشتیبانی از فرمت با میلی‌ثانیه و بدون میلی‌ثانیه
+                    if '.' in scheduled_time_str:
+                        scheduled_time_obj = datetime.strptime(scheduled_time_str, "%H:%M:%S.%f").time()
+                    else:
+                        scheduled_time_obj = datetime.strptime(scheduled_time_str, "%H:%M:%S").time()
                 except (ValueError, TypeError) as e:
-                    logger.error(f"فرمت زمان برنامه‌ریزی شده نامعتبر است: {scheduled_time_str}. فرمت مورد انتظار: HH:MM:SS.sss - {e}")
+                    logger.error(f"فرمت زمان برنامه‌ریزی شده نامعتبر است: {scheduled_time_str}. فرمت مورد انتظار: HH:MM:SS یا HH:MM:SS.sss - {e}")
                     self.add_log(f"خطا: فرمت زمان برنامه‌ریزی شده نامعتبر: {scheduled_time_str}", "error")
                     raise ValueError(f"Invalid scheduled time format: {e}")
 
@@ -378,16 +389,25 @@ class MofidBroker:
                 target_datetime = tehran_tz.localize(naive_target_datetime)
 
                 if target_datetime < now_system:
-                    if (now_system - target_datetime).total_seconds() > 300: 
-                        logger.error(f"زمان برنامه‌ریزی شده {target_datetime.strftime('%H:%M:%S.%f')} برای امروز به طور قابل توجهی گذشته است (زمان فعلی: {now_system.strftime('%H:%M:%S.%f')}).")
-                        self.add_log(f"خطا: زمان برنامه‌ریزی شده {target_datetime.strftime('%H:%M:%S.%f')} برای امروز گذشته است.", "error")
+                    # اگر زمان گذشته است، بررسی کنید که آیا مربوط به روز بعد است یا خیر
+                    if (now_system - target_datetime).total_seconds() > 300: # اگر بیش از 5 دقیقه گذشته باشد
+                        logger.warning(f"زمان برنامه‌ریزی شده {target_datetime.strftime('%H:%M:%S.%f')} برای امروز گذشته است. بررسی برای روز بعد...")
+                        # اگر زمان برای امروز گذشته، آن را برای فردا تنظیم کنید
+                        # این بخش نیاز به بررسی دقیق‌تر دارد که آیا این رفتار مطلوب است یا خیر
+                        # target_datetime += timedelta(days=1)
+                        # logger.info(f"زمان برنامه‌ریزی شده به روز بعد منتقل شد: {target_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')}")
+                        # self.add_log(f"هشدار: زمان برنامه‌ریزی شده {scheduled_time_str} برای امروز گذشته، در نظر گرفتن برای فردا.", "warning")
+                        # فعلا فرض می‌کنیم اگر گذشته، خطاست یا باید بلافاصله اجرا شود
+                        self.add_log(f"خطا: زمان برنامه‌ریزی شده {target_datetime.strftime('%H:%M:%S.%f')} برای امروز به طور قابل توجهی گذشته است.", "error")
                         raise ValueError("Scheduled time for today has already significantly passed.")
                     logger.warning(f"زمان برنامه‌ریزی شده {target_datetime.strftime('%H:%M:%S.%f')} برای امروز کمی گذشته است (زمان فعلی: {now_system.strftime('%H:%M:%S.%f')}). بلافاصله ادامه می‌دهیم.")
                     self.add_log(f"هشدار: زمان برنامه‌ریزی شده {target_datetime.strftime('%H:%M:%S.%f')} کمی گذشته، ادامه فوری.", "warning")
-                else:
+
+                else: # انتظار برای زمان برنامه‌ریزی شده
                     self.add_log(f"بات در حال انتظار برای زمان برنامه‌ریزی شده (ساعت تهران): {target_datetime.strftime('%H:%M:%S.%f')}", "info")
                     logger.info(f"Waiting for scheduled time (Tehran clock): {target_datetime.strftime('%H:%M:%S.%f')}")
 
+                    # حلقه انتظار دقیق‌تر
                     while True:
                         current_system_time = datetime.now(tehran_tz)
                         remaining_seconds = (target_datetime - current_system_time).total_seconds()
@@ -395,16 +415,21 @@ class MofidBroker:
                         if remaining_seconds <= 0: 
                             break
                         
-                        if remaining_seconds > 0.02: 
-                            time.sleep(max(0.0001, min(0.01, remaining_seconds / 2.0)))
-                        elif remaining_seconds > 0.0001: 
-                            time.sleep(0.00001) 
-                        
+                        # استفاده از sleep‌های بسیار کوتاه برای دقت بالا
+                        # این مقادیر ممکن است نیاز به تنظیم دقیق بر اساس سیستم داشته باشند
+                        if remaining_seconds > 0.01: # اگر بیش از 10 میلی‌ثانیه باقی مانده
+                            time.sleep(0.001) # خواب 1 میلی‌ثانیه
+                        elif remaining_seconds > 0.0001: # اگر بیش از 0.1 میلی‌ثانیه باقی مانده
+                            time.sleep(0.00001) # خواب 10 میکروثانیه
+                        # برای زمان‌های بسیار کوتاه، حلقه بدون sleep اجرا می‌شود (busy-waiting)
+                        # این کار CPU را مصرف می‌کند اما دقت زمانی را افزایش می‌دهد
+                
                 logger.info(f"زمان برنامه‌ریزی شده {target_datetime.strftime('%H:%M:%S.%f')} فرا رسید. شروع ارسال سریع.")
                 self.add_log(f"زمان برنامه‌ریزی شده فرا رسید. شروع ارسال سریع در {datetime.now(tehran_tz).strftime('%H:%M:%S.%f')}", "info")
 
-            # --- شروع حلقه ارسال سریع سفارش ---
+            # --- شروع حلقه ارسال سریع سفارش (بخش بهینه‌سازی شده) ---
             logger.info(f"Locating {action} submit button for burst")
+            # انتخابگر دکمه ارسال نهایی (خرید/فروش)
             submit_selector = f"button.btn-sm.btn-{'success' if action == 'buy' else 'danger'}"
             try:
                 submit_button = WebDriverWait(self.driver, 5).until(
@@ -412,111 +437,109 @@ class MofidBroker:
                 )
             except TimeoutException:
                 self.add_log(f"انتخابگر اصلی دکمه ارسال {action} ناموفق بود، تلاش با XPath.", "warning")
-                submit_selector_xpath = f"//button[contains(@class, 'btn-sm') and (contains(., 'ارسال خرید') or contains(., 'ارسال فروش')) and contains(@class, 'btn-{'success' if action == 'buy' else 'danger'}')]"
+                # انتخابگر XPath جایگزین و عمومی‌تر
+                submit_selector_xpath = f"//button[contains(@class, 'btn-sm') and (contains(., 'ارسال {('خرید' if action == 'buy' else 'فروش')}') or contains(., '{action.capitalize()}')) and contains(@class, 'btn-{'success' if action == 'buy' else 'danger'}')]"
                 submit_button = self.wait_for_element(By.XPATH, submit_selector_xpath)
             
             WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable(submit_button))
             self.add_log("دکمه ارسال برای حلقه سریع آماده است.", "info")
 
-            start_burst_time = time.perf_counter()
+            start_burst_time = time.perf_counter() # زمان شروع دقیق با perf_counter
             burst_duration_seconds = 20  # مدت زمان ارسال سریع (مثلا 20 ثانیه)
-            min_interval_seconds = 0.001 # حداقل فاصله زمانی 1 میلی‌ثانیه
-            last_click_time = 0 # زمان آخرین کلیک موفق
-
-            success_message_keyword = "هسته معاملات ثبت گردید" 
+            
             click_count = 0
             order_successful = False
-
-            self.add_log(f"شروع حلقه ارسال سریع در {datetime.now(tehran_tz).strftime('%H:%M:%S.%f')} با محدودیت نرخ {min_interval_seconds*1000:.0f}ms", "info")
-
-            while (time.perf_counter() - start_burst_time) < burst_duration_seconds:
-                current_loop_time = time.perf_counter()
-
-                # بررسی محدودیت نرخ ارسال
-                if last_click_time > 0: # اگر اولین کلیک نیست
-                    time_since_last_click = current_loop_time - last_click_time
-                    if time_since_last_click < min_interval_seconds:
-                        sleep_duration = min_interval_seconds - time_since_last_click
-                        if sleep_duration > 0: # فقط اگر نیاز به خوابیدن باشد
-                           # logger.debug(f"Rate limit: sleeping for {sleep_duration:.4f}s") # برای دیباگ
-                           time.sleep(sleep_duration)
-                        # current_loop_time را بعد از sleep به‌روزرسانی می‌کنیم تا محاسبات بعدی دقیق‌تر باشند
-                        current_loop_time = time.perf_counter()
-
-
-                try:
-                    # کلیک با جاوااسکریپت برای سرعت بیشتر
-                    self.driver.execute_script("arguments[0].click();", submit_button)
-                    last_click_time = time.perf_counter() # ثبت زمان کلیک موفق
-                    click_count += 1
-                    current_click_log_time = datetime.now(tehran_tz).strftime("%H:%M:%S.%f")[:-3]
-                    self.submission_logs.append(f"{current_click_log_time}: تلاش {click_count} برای ارسال سفارش")
-                except Exception as e:
-                    current_error_time = datetime.now(tehran_tz).strftime("%H:%M:%S.%f")[:-3]
-                    self.submission_logs.append(f"{current_error_time}: خطا در کلیک (تلاش {click_count}): {str(e)}")
-                    # اگر کلیک با خطا مواجه شد، شاید بهتر باشد کمی صبر کنیم یا به تلاش بعدی برویم
-                    # time.sleep(0.001) # تاخیر بسیار کوتاه در صورت بروز خطا در کلیک
-                    continue # ادامه به تلاش بعدی در حلقه while
-
-                # بررسی پیام موفقیت با تناوب (مثلا هر 3 کلیک یا اولین کلیک)
-                if click_count == 1 or click_count % 3 == 0:
-                    try:
-                        message_elements = self.driver.find_elements(By.CSS_SELECTOR, "span[data-cy='notify-message']")
-                        if message_elements:
-                            message_text = message_elements[-1].text.strip() 
-                            if message_text: 
-                                msg_time = datetime.now(tehran_tz).strftime("%H:%M:%S.%f")[:-3]
-                                self.submission_logs.append(f"{msg_time}: پیام کارگزار: {message_text}")
-                                self.add_log(f"پیام اعلان دریافت شد: {message_text}", "info")
-                                
-                                if success_message_keyword in message_text:
-                                    logger.info(f"پیام موفقیت‌آمیز '{success_message_keyword}' دریافت شد، توقف ارسال.")
-                                    self.add_log(f"پیام موفقیت‌آمیز '{success_message_keyword}' دریافت شد.", "success")
-                                    order_successful = True
-                                    break 
-                    except Exception: 
-                        pass
+            # کلمه کلیدی برای تشخیص پیام موفقیت (باید با پیام واقعی کارگزاری تطابق داشته باشد)
+            success_message_keyword = "هسته معاملات ثبت گردید" 
             
-            self.add_log(f"پایان حلقه ارسال سریع. کل کلیک‌ها: {click_count}. زمان سپری شده: {time.perf_counter() - start_burst_time:.3f} ثانیه.", "info")
+            # لاگ شروع حلقه ارسال سریع با زمان دقیق
+            self.add_log(f"شروع حلقه ارسال سریع در {datetime.now(tehran_tz).strftime('%H:%M:%S.%f')} بدون محدودیت نرخ مصنوعی.", "info")
+            self.submission_logs.append(f"{datetime.now(tehran_tz).strftime('%H:%M:%S.%f')[:-3]}: شروع  ارسال سریع سفارشات.")
 
-            if not order_successful:
-                logger.info("بررسی نهایی برای پیام پس از اتمام زمان انفجار")
+            # حلقه اصلی ارسال سفارش با حداکثر سرعت
+            while (time.perf_counter() - start_burst_time) < burst_duration_seconds:
                 try:
-                    time.sleep(0.5) # فرصت برای نمایش پیام
-                    message_elements = self.driver.find_elements(By.CSS_SELECTOR, "span[data-cy='notify-message']")
-                    if message_elements:
-                        final_message = message_elements[-1].text.strip()
-                        if final_message:
+                    # کلیک با جاوااسکریپت برای سرعت بیشتر و جلوگیری از مشکلات احتمالی کلیک استاندارد
+                    self.driver.execute_script("arguments[0].click();", submit_button)
+                    click_count += 1
+                    # لاگ‌برداری در این بخش به حداقل ممکن کاهش یافته است
+                    # می‌توان زمان هر کلیک را در یک لیست ذخیره کرد و بعدا پردازش نمود
+                    # self.submission_logs.append(f"{datetime.now(tehran_tz).strftime('%H:%M:%S.%f')[:-3]}: کلیک {click_count}")
+
+                except Exception as e:
+                    # در صورت بروز خطا در کلیک، آن را لاگ کرده و ادامه می‌دهیم
+                    # این خطاها ممکن است به دلیل سرعت بالای ارسال باشند
+                    current_error_time = datetime.now(tehran_tz).strftime("%H:%M:%S.%f")[:-3]
+                    self.submission_logs.append(f"{current_error_time}: خطا در ارسال سفارشات (تلاش {click_count}): {str(e)[:100]}") # کوتاه کردن پیام خطا
+                    # در صورت بروز خطای زیاد، شاید بهتر باشد حلقه متوقف شود یا تاخیر کوچکی ایجاد شود
+                    # اما طبق درخواست، هدف حداکثر سرعت است
+                    continue 
+                
+                # بررسی پیام موفقیت در اینجا حذف شده تا سرعت حلقه کم نشود
+                # این بررسی پس از اتمام حلقه انجام خواهد شد
+
+            # پایان حلقه ارسال سریع
+            end_burst_time = time.perf_counter()
+            total_burst_duration = end_burst_time - start_burst_time
+            self.add_log(f"پایان حلقه ارسال سریع. کل کلیک‌ها: {click_count}. زمان سپری شده: {total_burst_duration:.4f} ثانیه.", "info")
+            self.submission_logs.append(f"{datetime.now(tehran_tz).strftime('%H:%M:%S.%f')[:-3]}: پایان ارسال سفارشات . تعداد کل سفارشات ارسالی : {click_count}, مدت: {total_burst_duration:.4f}s")
+
+            # بررسی نهایی برای پیام موفقیت پس از اتمام زمان انفجار
+            # این بخش مهم است چون در طول حلقه، پیام‌ها چک نمی‌شوند
+            logger.info("بررسی نهایی برای پیام پس از اتمام زمان انفجار")
+            self.add_log("شروع بررسی نهایی پیام کارگزاری پس از اتمام حلقه ارسال.", "info")
+            try:
+                # کمی صبر برای اینکه پیام‌های احتمالی در DOM ظاهر شوند
+                time.sleep(0.5) # این زمان ممکن است نیاز به تنظیم داشته باشد
+                
+                # تلاش برای یافتن همه پیام‌های اعلان
+                message_elements = self.driver.find_elements(By.CSS_SELECTOR, "span[data-cy='notify-message']")
+                
+                if message_elements:
+                    # بررسی آخرین پیام یا همه پیام‌ها برای کلمه کلیدی موفقیت
+                    for msg_element in reversed(message_elements): # بررسی از آخرین پیام
+                        final_message = msg_element.text.strip()
+                        if final_message: # اگر پیام خالی نباشد
                             msg_time = datetime.now(tehran_tz).strftime("%H:%M:%S.%f")[:-3]
-                            self.submission_logs.append(f"{msg_time}: پیام نهایی کارگزار (پس از انفجار): {final_message}")
+                            log_msg = f"{msg_time}: پیام نهایی کارگزار (پس از انفجار): {final_message}"
+                            self.submission_logs.append(log_msg)
                             self.add_log(f"پیام نهایی پس از انفجار: {final_message}", "info")
+                            
                             if success_message_keyword in final_message:
                                 order_successful = True
-                                self.add_log("موفقیت در بررسی نهایی تأیید شد.", "success")
-                            else:
-                                self.add_log(f"عدم موفقیت بر اساس پیام نهایی: {final_message}", "warning")
-                    else:
-                        self.add_log("هیچ پیام نهایی پس از انفجار یافت نشد.", "warning")
-                        self.submission_logs.append(f"{datetime.now(tehran_tz).strftime('%H:%M:%S.%f')[:-3]}: هیچ پیام نهایی کارگزار (پس از انفجار) یافت نشد")
-                except Exception as e:
-                    self.add_log(f"خطا در بررسی پیام نهایی: {str(e)}", "warning")
-                    self.submission_logs.append(f"{datetime.now(tehran_tz).strftime('%H:%M:%S.%f')[:-3]}: خطا در بررسی پیام نهایی: {str(e)}")
+                                self.add_log(f"موفقیت بر اساس پیام '{success_message_keyword}' تأیید شد.", "success")
+                                break # اگر پیام موفقیت پیدا شد، از حلقه خارج شو
+                    if not order_successful:
+                         self.add_log("پیام موفقیت در بررسی نهایی یافت نشد.", "warning")
+                else:
+                    self.add_log("هیچ پیام نهایی پس از ارسال سفارشاتیافت نشد.", "warning")
+                    self.submission_logs.append(f"{datetime.now(tehran_tz).strftime('%H:%M:%S.%f')[:-3]}: هیچ پیام نهایی کارگزار (پس از انفجار) یافت نشد")
+
+            except Exception as e:
+                # خطاهایی که ممکن است در حین تلاش برای خواندن پیام‌ها رخ دهد
+                self.add_log(f"خطا در بررسی پیام نهایی: {str(e)}", "warning")
+                self.submission_logs.append(f"{datetime.now(tehran_tz).strftime('%H:%M:%S.%f')[:-3]}: خطا در بررسی پیام نهایی: {str(e)}")
 
             logger.info("Order placement process completed within place_order.")
             self.add_log("فرآیند ارسال سفارش در place_order تکمیل شد", "info")
-            return {"success": order_successful, "logs": self.logs, "submission_logs": self.submission_logs}
+            return {"success": order_successful, "logs": self.logs, "submission_logs": self.submission_logs, "click_count": click_count, "burst_duration": total_burst_duration}
 
         except TimeoutException as e:
             logger.error(f"Timeout waiting for element during order placement: {e}")
             self.add_log(f"خطای وقفه زمانی در ارسال سفارش: {str(e)}", "error")
             current_time = datetime.now(tehran_tz).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             self.submission_logs.append(f"{current_time}: خطای وقفه زمانی: {str(e)}")
-            raise
+            # raise # یا برگرداندن نتیجه ناموفق بدون raise کردن مجدد
+            return {"success": False, "logs": self.logs, "submission_logs": self.submission_logs, "error": f"Timeout: {str(e)}"}
         except Exception as e:
             logger.error(f"An error occurred during order placement: {e}")
             self.add_log(f"خطا در ارسال سفارش: {str(e)}", "error")
             current_time = datetime.now(tehran_tz).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             self.submission_logs.append(f"{current_time}: خطا در ارسال سفارش: {str(e)}")
+            # raise # یا برگرداندن نتیجه ناموفق
+            return {"success": False, "logs": self.logs, "submission_logs": self.submission_logs, "error": f"Exception: {str(e)}"}
+
+
             raise
 
 
