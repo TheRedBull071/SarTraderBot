@@ -2700,7 +2700,7 @@ async def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
     # asyncio.create_task(schedule_order_detail_cleanup(context, session, session.user_id))
 
     return POST_ORDER_CHOICE
-�
+
 
 async def handle_post_order_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
