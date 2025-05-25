@@ -51,6 +51,11 @@ from mysql.connector import Error
 from mysql.connector import pooling
 from datetime import datetime
 
+import os 
+import asyncio 
+from telegram import InputFile 
+from telegram.error import BadRequest 
+
 
 logger = getLogger(__name__)
 
@@ -2584,10 +2589,142 @@ async def handle_view_details(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     return POST_ORDER_CHOICE
 
-async def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Callback for the 'نمایش مجدد جزئیات سفارش' button."""
-    return await handle_view_details(update, context, reshow=True)
+sync def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the 'نمایش مجدد جزئیات' button by fetching and sending the order history Excel."""
+    query = update.callback_query
+    await query.answer()
 
+    session = context.user_data["session"]
+    session.update_activity()
+    user_data = session.user_data
+
+    if not user_data or not is_subscription_active(user_data):
+        await query.edit_message_text(
+            f"{EMOJI['error']} شما اجازه دسترسی به این بخش را ندارید. "
+            f"لطفا ابتدا ثبت‌نام کرده و یا اشتراک خود را تمدید کنید."
+        )
+        return await start(update, context)
+
+    if not session.is_logged_in:
+        await query.edit_message_text(
+            f"{EMOJI['error']} شما وارد حساب کارگزاری مفید نشده‌اید. لطفاً ابتدا با دستور /start وارد شوید."
+        )
+        return await start(update, context) # بازگشت به منوی اصلی برای ورود
+
+    # پاک کردن پیام‌های جزئیات قبلی (اگر وجود داشته باشد)
+    for msg_id in list(session.order_detail_message_ids):
+        try:
+            await context.bot.delete_message(chat_id=session.user_id, message_id=msg_id)
+        except BadRequest: # پیام ممکن است قبلا حذف شده باشد
+            pass
+        except Exception as e:
+            logger.error(f"Error deleting old detail message {msg_id} in reshow_order_details: {e}")
+    session.order_detail_message_ids = []
+
+    stock_name = session.order_details.get("stock")
+    # 'action' باید 'خرید' یا 'فروش' باشد همانطور که در session.order_details ذخیره شده
+    order_action_persian = session.order_details.get("action") 
+
+    if not stock_name or not order_action_persian:
+        err_msg_no_details = f"{EMOJI['error']} اطلاعات سفارش (نماد یا نوع معامله) برای دریافت تاریخچه یافت نشد."
+        msg = await context.bot.send_message(chat_id=session.user_id, text=err_msg_no_details)
+        session.order_detail_message_ids.append(msg.message_id)
+        session.add_log(err_msg_no_details, "error")
+        
+        post_order_keyboard_err = [
+            [InlineKeyboardButton(f"{EMOJI['new_order']} شروع سفارش جدید", callback_data="post_order_new_order_mofid")],
+            [InlineKeyboardButton(f"{EMOJI['logout']} خروج از حساب کارگزاری", callback_data="post_order_logout_mofid")],
+        ]
+        await context.bot.send_message(
+            chat_id=session.user_id,
+            text="لطفا یک گزینه را انتخاب کنید:", 
+            reply_markup=InlineKeyboardMarkup(post_order_keyboard_err)
+        )
+        return POST_ORDER_CHOICE
+
+    loading_msg_text = f"{EMOJI['loading']} در حال آماده‌سازی تاریخچه سفارشات برای نماد *'{stock_name}'* ({order_action_persian}) از کارگزاری مفید...\nاین عملیات ممکن است چند لحظه طول بکشد."
+    status_msg = await context.bot.send_message(chat_id=session.user_id, text=loading_msg_text, parse_mode="Markdown")
+    session.order_detail_message_ids.append(status_msg.message_id)
+
+    downloaded_excel_path = None
+    try:
+        loop = asyncio.get_event_loop()
+        # اجرای متد همزمان get_order_history_excel در یک ترد جداگانه
+        downloaded_excel_path = await loop.run_in_executor(
+            None,  # استفاده از thread pool پیش‌فرض
+            session.bot.get_order_history_excel, # متد مورد نظر برای اجرا
+            stock_name,                         # آرگومان اول متد
+            order_action_persian                # آرگومان دوم متد
+        )
+
+        if downloaded_excel_path and os.path.exists(downloaded_excel_path):
+            session.add_log(f"فایل تاریخچه سفارشات '{os.path.basename(downloaded_excel_path)}' با موفقیت در سرور دریافت شد.", "success")
+            file_name_for_user = f"Mofid_OrderHistory_{stock_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            try:
+                with open(downloaded_excel_path, 'rb') as excel_file:
+                    await context.bot.send_document(
+                        chat_id=session.user_id,
+                        document=InputFile(excel_file, filename=file_name_for_user),
+                        caption=f"{EMOJI['details']} فایل تاریخچه سفارشات برای نماد **{stock_name}** (عملیات: {order_action_persian}).",
+                        parse_mode="Markdown"
+                    )
+                session.add_log(f"فایل اکسل تاریخچه سفارشات ({file_name_for_user}) با موفقیت برای کاربر ارسال شد.", "success")
+                await context.bot.edit_message_text(
+                    chat_id=session.user_id,
+                    message_id=status_msg.message_id,
+                    text=f"{EMOJI['success']} فایل تاریخچه سفارشات با موفقیت ارسال شد."
+                )
+            except Exception as send_err:
+                logger.error(f"Error sending Excel document to user {session.user_id}: {send_err}")
+                session.add_log(f"خطا در ارسال فایل اکسل به کاربر: {send_err}", "error")
+                await context.bot.edit_message_text(
+                    chat_id=session.user_id,
+                    message_id=status_msg.message_id,
+                    text=f"{EMOJI['error']} خطا در ارسال فایل تاریخچه سفارشات به شما. {send_err}"
+                )
+            finally:
+                try:
+                    os.remove(downloaded_excel_path)
+                    logger.info(f"Temporary Excel file {downloaded_excel_path} deleted.")
+                    session.add_log(f"فایل اکسل موقت از سرور حذف شد: {os.path.basename(downloaded_excel_path)}", "info")
+                except OSError as e:
+                    logger.error(f"Error deleting temporary Excel file {downloaded_excel_path}: {e}")
+                    session.add_log(f"خطا در حذف فایل اکسل موقت از سرور: {e}", "error")
+        else:
+            # این پیام در صورتی نمایش داده می‌شود که get_order_history_excel مقدار None برگرداند (یعنی دانلود ناموفق بود)
+            msg_fail = f"{EMOJI['error']} دریافت گزارش تاریخچه سفارشات برای نماد '{stock_name}'ناموفق بود ."
+            await context.bot.edit_message_text(chat_id=session.user_id, message_id=status_msg.message_id, text=msg_fail)
+            session.add_log(msg_fail, "error")
+
+    except Exception as e:
+        logger.error(f"Critical error in reshow_order_details (fetching/sending Excel) for user {session.user_id}: {e}", exc_info=True)
+        detailed_error_msg = f"{EMOJI['error']} یک خطای پیش‌بینی نشده در هنگام پردازش درخواست تاریخچه سفارشات رخ داد. لطفاً دقایقی دیگر مجددا تلاش کنید."
+        try:
+            await context.bot.edit_message_text(chat_id=session.user_id, message_id=status_msg.message_id, text=detailed_error_msg)
+        except BadRequest: 
+            new_err_msg = await context.bot.send_message(chat_id=session.user_id, text=detailed_error_msg)
+            session.order_detail_message_ids.append(new_err_msg.message_id)
+        session.add_log(f"خطای بحرانی و غیرمنتظره در reshow_order_details: {str(e)}", "critical")
+
+    # کیبورد گزینه‌های پس از سفارش/نمایش جزئیات
+    post_order_keyboard = [
+        [InlineKeyboardButton(f"{EMOJI['details']} دریافت مجدد جزئیات 10 سفارش اخر ", callback_data="reshow_details")],
+        [InlineKeyboardButton(f"{EMOJI['new_order']} شروع سفارش جدید", callback_data="post_order_new_order_mofid")],
+        [InlineKeyboardButton(f"{EMOJI['logout']} خروج از حساب کارگزاری", callback_data="post_order_logout_mofid")],
+    ]
+    
+    
+
+    final_options_msg = await context.bot.send_message(
+        chat_id=session.user_id,
+        text=f"{EMOJI['info']} لطفاً گزینه بعدی خود را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(post_order_keyboard)
+    )
+    session.order_detail_message_ids.append(final_options_msg.message_id)
+    
+    #asyncio.create_task(schedule_order_detail_cleanup(context, session, session.user_id))
+
+    return POST_ORDER_CHOICE
 
 async def handle_post_order_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query

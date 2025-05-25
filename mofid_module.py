@@ -9,6 +9,9 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
+import os 
+import glob 
+from selenium.webdriver.support.ui import Select 
 
 
 
@@ -18,6 +21,10 @@ class MofidBroker:
         self.driver = None # باید توسط setup_driver مقداردهی شود
         self.logs = []
         self.submission_logs = []
+        # دایرکتوری برای دانلود فایل‌های اکسل تعریف و ایجاد می‌شود
+        self.download_dir = os.path.join(os.getcwd(), "temp_mofid_downloads")
+        os.makedirs(self.download_dir, exist_ok=True)
+        
         # این بخش برای اجرای مستقل کد اضافه شده، در کد اصلی شما نیاز نیست
         global logger, tehran_tz
         logger = logging.getLogger(__name__)
@@ -30,31 +37,35 @@ class MofidBroker:
         try:
             chrome_options = Options()
             # --- Essential Headless Mode Options ---
-            chrome_options.add_argument("--headless")  # Run Chrome in headless mode
-            chrome_options.add_argument("--no-sandbox") # Bypass OS security model, REQUIRED for headless Linux
-            chrome_options.add_argument("--disable-dev-shm-usage") # Overcome limited resource problems
+            #chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
 
             # --- Performance & Resource Optimization Options ---
-            chrome_options.add_argument("--disable-gpu")  # Disable GPU hardware acceleration (often not needed for headless)
-            chrome_options.add_argument("--disable-extensions")  # Disable extensions
-            chrome_options.add_argument("--disable-infobars")  # Disable infobars
-            chrome_options.add_argument("--disable-popup-blocking") # Disable pop-up blocking
-            chrome_options.add_argument("--disable-notifications") # Disable notifications
-            chrome_options.add_argument("--disable-logging") # Disable logging
-            chrome_options.add_argument("--log-level=3") # Suppress console logs
-            chrome_options.add_argument("--silent") # Suppress console logs (alternative)
-            chrome_options.add_argument("--blink-settings=imagesEnabled=false") # Disable images
-            # chrome_options.add_argument("--disable-javascript") # Uncomment if JavaScript is not strictly needed for the target site
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-infobars")
+            chrome_options.add_argument("--disable-popup-blocking")
+            chrome_options.add_argument("--disable-notifications")
+            chrome_options.add_argument("--disable-logging")
+            chrome_options.add_argument("--log-level=3")
+            chrome_options.add_argument("--silent")
+            chrome_options.add_argument("--blink-settings=imagesEnabled=false")
 
             # --- Stability & Compatibility Options ---
-            chrome_options.add_argument("--window-size=1920,1080") # Specify window size, can be important for some sites even in headless
+            chrome_options.add_argument("--window-size=1920,1080")
             chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"]) # Hide "Chrome is being controlled by automated test software"
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled") # Further attempt to hide automation
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
 
-            # --- Network Optimization (Optional - can sometimes cause issues) ---
-            # chrome_options.add_argument('--dns-prefetch-disable')
-            # chrome_options.add_argument('--disable-setuid-sandbox') # Use with caution
+            # --- Download Preferences ---
+            prefs = {
+                "download.default_directory": self.download_dir,
+                "download.prompt_for_download": False,
+                "download.directory_upgrade": True,
+                "safeBrowse.enabled": True  # Keep safeBrowse enabled for security unless it causes issues
+            }
+            chrome_options.add_experimental_option("prefs", prefs)
 
             self.driver = webdriver.Chrome(options=chrome_options)
             
@@ -72,10 +83,180 @@ class MofidBroker:
                     });
                 """
             })
+            logger.info(f"WebDriver setup complete. Download directory set to: {self.download_dir}")
             return True
         except WebDriverException as e:
             print(f"Error setting up WebDriver: {e}")
             return False
+        except Exception as e:
+            print(f"An unexpected error occurred during WebDriver setup: {e}")
+            return False
+
+
+    def get_order_history_excel(self, stock_name, order_action_persian, download_timeout=45):
+        if not self.driver:
+            logger.error("Driver not initialized for get_order_history_excel.")
+            self.add_log("خطا: درایور برای دریافت تاریخچه سفارشات مقداردهی نشده است.", "error")
+            return None
+        
+        try:
+            logger.info(f"Starting order history Excel retrieval for stock: {stock_name}, action: {order_action_persian} (date filter removed)")
+            self.add_log(f"شروع دریافت تاریخچه سفارشات (اکسل) برای نماد: {stock_name}, نوع: {order_action_persian} (بدون فیلتر تاریخ)", "info")
+
+            # Step 1: Click "Order History" icon
+            logger.info("Clicking Order History icon...")
+            history_icon_selector = "li[data-cy='order-history-menu-icon']"
+            history_icon = self.wait_for_element(By.CSS_SELECTOR, history_icon_selector, timeout=15)
+            self.driver.execute_script("arguments[0].click();", history_icon) 
+            self.add_log("آیکون تاریخچه سفارشات کلیک شد", "info")
+            time.sleep(1.5) 
+
+            # Step 2: Fill stock symbol
+            self.wait_for_element(By.XPATH, "//button[normalize-space()='اعمال فیلتر']", timeout=10) 
+            logger.info(f"Entering stock symbol: {stock_name}...")
+            search_input_selector = "input[data-cy='layout-search-input']"
+            stock_input_field = self.wait_for_element(By.CSS_SELECTOR, search_input_selector, timeout=10)
+            stock_input_field.clear()
+            stock_input_field.send_keys(stock_name)
+            self.add_log(f"نماد '{stock_name}' در فیلد جستجو وارد شد", "info")
+            time.sleep(2.5) 
+
+            # Step 3: Click stock symbol from list
+            logger.info(f"Selecting '{stock_name}' from results...")
+            clickable_stock_xpath = f"//div[@data-cy='search-symbol-item'][.//span[@class='fw-bold' and normalize-space(text())='{stock_name}']]//div[contains(@class, 'cup')]"
+            stock_element_in_list = self.wait_for_element(By.XPATH, clickable_stock_xpath, timeout=10)
+            WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, clickable_stock_xpath)))
+            stock_element_in_list.click()
+            self.add_log(f"نماد '{stock_name}' از لیست نتایج انتخاب شد", "info")
+            time.sleep(0.5)
+
+            # Step 4: Select order side
+            logger.info(f"Selecting order side: {order_action_persian}...")
+            order_side_select_elem = self.wait_for_element(By.ID, "orderSide", timeout=5)
+            order_side_select = Select(order_side_select_elem)
+            if order_action_persian == "خرید":
+                order_side_select.select_by_value("1: 0")
+            elif order_action_persian == "فروش":
+                order_side_select.select_by_value("2: 1")
+            self.add_log(f"سمت سفارش '{order_action_persian}' انتخاب شد", "info")
+            time.sleep(0.5)
+
+            # Step 5: Select status "همه"
+            logger.info("Selecting status 'همه'...")
+            status_select_elem = self.wait_for_element(By.ID, "states", timeout=5)
+            status_select = Select(status_select_elem)
+            status_select.select_by_value("1: 1") 
+            self.add_log("وضعیت سفارشات 'همه' انتخاب شد", "info")
+            time.sleep(0.5)
+
+            # Step 6: Date selection is REMOVED as per user request
+            self.add_log("مرحله انتخاب تاریخ (فیلتر تاریخ) طبق درخواست حذف شد.", "info")
+            logger.info("Date selection (Step 6) has been removed.")
+
+            # Step 7: Click "اعمال فیلتر" button
+            logger.info("Clicking 'اعمال فیلتر' button...")
+            apply_filter_button_xpath = "//button[normalize-space()='اعمال فیلتر' and @type='submit']"
+            apply_filter_button = WebDriverWait(self.driver,15).until(
+                EC.element_to_be_clickable((By.XPATH, apply_filter_button_xpath))
+            )
+            self.driver.execute_script("arguments[0].click();", apply_filter_button)
+            self.add_log("دکمه 'اعمال فیلتر' کلیک شد", "info")
+            time.sleep(3.5) # Wait for table to load/update based on other filters
+
+            # Step 8: Click "Export to Excel" and handle download
+            logger.info("Preparing to download Excel file...")
+            for pattern in ["*.xlsx", "*.xls", "*.crdownload"]:
+                for old_file in glob.glob(os.path.join(self.download_dir, pattern)):
+                    try: 
+                        os.remove(old_file)
+                        logger.info(f"Removed old/partial file: {old_file}")
+                    except OSError as e:
+                        logger.warning(f"Could not remove old/partial file {old_file}: {e}")
+            
+            files_before = set(os.listdir(self.download_dir))
+            logger.info(f"Files in download dir before Excel export click ('{self.download_dir}'): {files_before}")
+
+            export_icon_xpath = "//svg-icon[@title='خروجی اکسل']" 
+            self.add_log(f"جستجو برای آیکون خروجی اکسل: {export_icon_xpath}", "debug")
+            
+            export_button_element = WebDriverWait(self.driver, 20).until(
+                EC.element_to_be_clickable((By.XPATH, export_icon_xpath))
+            )
+            self.add_log("آیکون خروجی اکسل پیدا و قابل کلیک است.", "info")
+            
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", export_button_element)
+            time.sleep(0.3)
+            self.driver.execute_script("arguments[0].click();", export_button_element) 
+            self.add_log("آیکون 'خروجی اکسل' کلیک شد.", "info")
+            
+            time.sleep(2.0) 
+
+            start_time = time.time()
+            downloaded_file_path = None
+            self.add_log(f"Monitoring download directory: {self.download_dir} for {download_timeout}s", "debug")
+
+            while time.time() - start_time < download_timeout:
+                current_files_in_dir = os.listdir(self.download_dir)
+                logger.debug(f"Files currently in download dir: {current_files_in_dir}")
+                files_after = set(current_files_in_dir)
+                new_files = files_after - files_before
+                
+                if new_files:
+                    logger.info(f"New items detected in download dir: {new_files}")
+                    for new_file_name in new_files:
+                        if new_file_name.lower().endswith(('.xlsx', '.xls')) and not new_file_name.lower().endswith('.crdownload'):
+                            full_path = os.path.join(self.download_dir, new_file_name)
+                            try:
+                                if os.path.exists(full_path):
+                                    initial_size = os.path.getsize(full_path)
+                                    if initial_size > 0: 
+                                        time.sleep(1.0) 
+                                        if os.path.exists(full_path) and os.path.getsize(full_path) == initial_size:
+                                            downloaded_file_path = full_path
+                                            self.add_log(f"فایل اکسل '{new_file_name}' (size: {initial_size} bytes) دانلود و تایید شد.", "success")
+                                            logger.info(f"Excel file downloaded and confirmed: {downloaded_file_path}")
+                                            break
+                                        else:
+                                            logger.debug(f"File '{new_file_name}' size changed or file disappeared, still writing/transient...")
+                                    else: 
+                                        logger.debug(f"Detected Excel file '{new_file_name}' but size is 0, waiting...")
+                                else: 
+                                     logger.debug(f"File '{new_file_name}' detected in dir listing but os.path.exists is false.")        
+                            except FileNotFoundError:
+                                logger.debug(f"File '{new_file_name}' was detected but then disappeared (possibly temp file before rename).")
+                                continue 
+                        elif new_file_name.lower().endswith('.crdownload'):
+                            logger.debug(f"Download in progress: {new_file_name}")
+                    if downloaded_file_path:
+                        break 
+                time.sleep(1.5) 
+            
+            if not downloaded_file_path:
+                self.add_log(f"فایل اکسل در زمان {download_timeout} ثانیه دانلود نشد.", "error")
+                logger.error(f"Excel download timed out. Monitored directory: {self.download_dir}")
+                final_files_in_dir = os.listdir(self.download_dir)
+                logger.error(f"Files present at timeout: {final_files_in_dir}")
+                self.driver.save_screenshot(f"excel_download_timeout_{stock_name}_{int(time.time())}.png")
+                return None
+            self.add_log("فرآیند دانلود اکسل تکمیل شد.", "info")
+            return downloaded_file_path
+
+        except TimeoutException as e:
+            logger.error(f"TimeoutException during order history retrieval for {stock_name}: {e}", exc_info=True)
+            self.add_log(f"خطای وقفه زمانی در دریافت تاریخچه سفارشات برای {stock_name}: {type(e).__name__}", "error")
+            try:
+                self.driver.save_screenshot(f"history_timeout_{stock_name}_{int(time.time())}.png")
+            except Exception as ex_ss:
+                 logger.error(f"Could not save screenshot on TimeoutException: {ex_ss}")
+            return None
+        except Exception as e:
+            logger.error(f"An error occurred during order history retrieval for {stock_name}: {e}", exc_info=True) 
+            self.add_log(f"خطا در دریافت تاریخچه سفارشات برای {stock_name}: {type(e).__name__} - {str(e)[:100]}", "error")
+            try:
+                self.driver.save_screenshot(f"history_error_{stock_name}_{int(time.time())}.png")
+            except Exception as ex_ss:
+                logger.error(f"Could not save screenshot on Exception: {ex_ss}")
+            return None
 
 
     def wait_for_element(self, by, value, timeout=10, retries=5):
