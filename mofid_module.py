@@ -1,4 +1,4 @@
-# ماژول ورژن 1
+# salam salam
 import logging
 import time
 from datetime import datetime, timedelta # timedelta اضافه شده است
