@@ -1,4 +1,4 @@
-#salam salam va kheili salam * Dual Push*
+#salam salam va kheili salam * Dual Push**
 import os
 from dotenv import load_dotenv
 import base64
