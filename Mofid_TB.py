@@ -731,34 +731,35 @@ class MofidBrokerSession:
             return {"success": False, "message": error_message, "submission_logs": order_submission_logs, "click_count": 0}
 
 async def schedule_order_detail_cleanup(context: ContextTypes.DEFAULT_TYPE, session: MofidBrokerSession, chat_id: int):
-    """Schedules the cleanup of order detail messages, excluding the final summary message."""
-    await asyncio.sleep(20)  # Wait for 10 seconds
-    logger.info(f"Initiating cleanup for user {chat_id}. Messages to delete: {session.order_detail_message_ids}")
-    if session.order_detail_message_ids:
-        deleted_count = 0
-        messages_to_delete = session.order_detail_message_ids[1:] if len(session.order_detail_message_ids) > 1 else []
-        for msg_id in list(messages_to_delete):
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                if msg_id in session.order_detail_message_ids:
-                    session.order_detail_message_ids.remove(msg_id)
-                deleted_count += 1
-            except BadRequest as e:
-                logger.error(f"Error deleting message {msg_id} for user {chat_id}: {e}")
-                if "message to delete not found" in str(e).lower() or "message can't be deleted" in str(e).lower():
-                    if msg_id in session.order_detail_message_ids:
-                        session.order_detail_message_ids.remove(msg_id)
-            except Exception as e:
-                logger.error(f"Unexpected error deleting message {msg_id} for user {chat_id}: {e}")
-        logger.info(f"Deleted {deleted_count} order detail messages for user {chat_id}.")
-        if deleted_count > 0:
-            cleanup_info_msg = await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"{EMOJI['cleanup']} جزئیات سفارش برای تمیز نگه داشتن چت پاک شدند.",
-                #reply_markup=InlineKeyboardMarkup([
-                    #[InlineKeyboardButton(f"{EMOJI['details']} نمایش مجدد جزئیات سفارش", callback_data="reshow_details")]
-                #])
-            )
+    # """Schedules the cleanup of order detail messages, excluding the final summary message."""
+    # await asyncio.sleep(20)  # Wait for 10 seconds
+    # logger.info(f"Initiating cleanup for user {chat_id}. Messages to delete: {session.order_detail_message_ids}")
+    # if session.order_detail_message_ids:
+    #     deleted_count = 0
+    #     messages_to_delete = session.order_detail_message_ids[1:] if len(session.order_detail_message_ids) > 1 else []
+    #     for msg_id in list(messages_to_delete):
+    #         try:
+    #             await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    #             if msg_id in session.order_detail_message_ids:
+    #                 session.order_detail_message_ids.remove(msg_id)
+    #             deleted_count += 1
+    #         except BadRequest as e:
+    #             logger.error(f"Error deleting message {msg_id} for user {chat_id}: {e}")
+    #             if "message to delete not found" in str(e).lower() or "message can't be deleted" in str(e).lower():
+    #                 if msg_id in session.order_detail_message_ids:
+    #                     session.order_detail_message_ids.remove(msg_id)
+    #         except Exception as e:
+    #             logger.error(f"Unexpected error deleting message {msg_id} for user {chat_id}: {e}")
+    #     logger.info(f"Deleted {deleted_count} order detail messages for user {chat_id}.")
+    #     if deleted_count > 0:
+    #         cleanup_info_msg = await context.bot.send_message(
+    #             chat_id=chat_id,
+    #             text=f"{EMOJI['cleanup']} جزئیات سفارش برای تمیز نگه داشتن چت پاک شدند.",
+    #             #reply_markup=InlineKeyboardMarkup([
+    #                 #[InlineKeyboardButton(f"{EMOJI['details']} نمایش مجدد جزئیات سفارش", callback_data="reshow_details")]
+    #             #])
+    #         )
+    pass
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2337,141 +2338,113 @@ async def execute_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     is_limited, limit_message = check_order_submission_rate_limit(session.user_id)
     if is_limited:
         await query.edit_message_text(limit_message)
-        return ORDER_CONFIRMATION 
+        return ORDER_CONFIRMATION
 
     order = session.order_details
-    session.order_detail_message_ids = []
-
+    
     loading_text = f"{EMOJI['loading']} در حال آماده سازی برای ارسال سفارش به مفید..."
     if order.get('scheduled_time_str_for_module') and order['send_method'] != "فوری":
         loading_text = (
             f"{EMOJI['clock']} سفارش برای نماد *{order['stock']}* در زمان *{order['scheduled_time_str_for_module']}* تنظیم شد.\n"
             f"ربات تا آن زمان منتظر مانده و سپس اقدام به ارسال سفارش خواهد کرد."
         )
-    await_query_message = await query.edit_message_text(text=loading_text, parse_mode="Markdown")
+    
+    # Keep the message ID of the "loading" message to delete it later.
+    loading_message_id_to_delete = None
+    try:
+        # Attempt to edit the message that triggered this handler (e.g., the confirmation message)
+        await query.edit_message_text(text=loading_text, parse_mode="Markdown")
+        loading_message_id_to_delete = query.message.message_id
+    except BadRequest as e:
+        logger.warning(f"Could not edit original message to loading text: {e}. Sending new loading message.")
+        # If editing fails (e.g., message too old), send a new one.
+        new_loading_msg = await context.bot.send_message(chat_id=session.user_id, text=loading_text, parse_mode="Markdown")
+        loading_message_id_to_delete = new_loading_msg.message_id
 
-    # Call the mofid_place_order method which internally calls the broker's place_order
+
     result = await session.mofid_place_order(
         stock_name=order['stock'],
         action=order['action'],
         quantity=order['quantity'],
-        price_option=order['price_choice'], # This should be 'max', 'min', or 'custom'
+        price_option=order['price_choice'],
         custom_price=order.get('custom_price'),
-        send_option=order['send_method'], # This should be 'now' or 'schedule'
+        send_option=order['send_method'],
         scheduled_time_str=order.get('scheduled_time_str_for_module')
     )
     
-    # Reset inactivity timer after order execution
     session.update_activity()
     logger.info(f"Reset inactivity timer for user {session.user_id} after executing order at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}.")
 
     record_order_submission(session.user_id)
 
-    # Store send_method for summary before clearing
     send_method_for_summary = order.get('send_method', 'نامشخص')
     scheduled_time_for_summary = order.get('scheduled_time_str_for_module', None)
 
-    # Clear scheduled order details and active orders after execution
     if order.get("stock") in session.active_orders:
         session.active_orders.remove(order["stock"])
-    # Clear these specific keys from order_details if they exist
     session.order_details.pop("scheduled_time_str_for_module", None)
-    # session.order_details.pop("send_method", None) # Keep send_method if it's used elsewhere, or clear if only for this order
     logger.info(f"Cleared scheduled order details for user {session.user_id} after execution.")
 
-    # Attempt to get a more precise time from submission_logs if available
-    session.first_successful_order_time = datetime.now().strftime('%H:%M:%S.%f')[:-3] # Default to now
-    # The result from mofid_place_order in MofidBrokerSession already processes submission_logs from the broker module
-    # So, result.get("submission_logs") here are the logs *after* MofidBrokerSession's wrapper.
-    # We need to ensure that the `click_count` is passed up from the MofidBroker module through MofidBrokerSession.
-    # Let's assume `result` from `session.mofid_place_order` now also contains `click_count`.
+    session.first_successful_order_time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+    # processed_submission_logs = result.get("submission_logs", []) # Raw logs if needed for other purposes
 
-    execution_details_list = []
     summary_text = f"""
-{EMOJI['done']} *خلاصه نهایی سفارش  * {EMOJI['done']}
+{EMOJI['done']} *خلاصه نهایی سفارشات* {EMOJI['done']}
 
 📊 *نماد:* {order['stock']} 
-🔹*نوع:* {order['action']}
+🔹 *نوع:* {order['action']}
 🏷️ *قیمت:* {order['price_value']} 
-💰 *تعداد:* {order['quantity']:,}
+� *تعداد:* {order['quantity']:,}
 ⏱ *روش ارسال:* {send_method_for_summary}
 """
     if scheduled_time_for_summary:
         summary_text += f"🕒 *زمان برنامه‌ریزی شده:* {scheduled_time_for_summary}\n"
     
-    # Try to get a more precise time from submission_logs if available
-    # This part might need adjustment based on how MofidBrokerSession formats its logs
-    processed_submission_logs = result.get("submission_logs", [])
-    if processed_submission_logs:
-        # Example: Find a line indicating success or start of burst if possible
-        # For now, using the default time or a time from a specific log entry
-        for log_line in processed_submission_logs:
-            if ": نتیجه:" in log_line or "شروع ارسال سریع" in log_line: # Example keywords
-                try:
-                    # Attempt to parse time from log_line
-                    # This is highly dependent on your log format
-                    time_part_match = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})", log_line)
-                    if not time_part_match: # Try HH:MM:SS.sss format
-                        time_part_match = re.search(r"(\d{2}:\d{2}:\d{2}\.\d{3})", log_line)
-                    
-                    if time_part_match:
-                        time_str_from_log = time_part_match.group(1)
-                        # Ensure it's a full datetime string if only time was matched
-                        if len(time_str_from_log) < 12: # Likely only HH:MM:SS.sss
-                           session.first_successful_order_time = f"{datetime.now().strftime('%Y-%m-%d')} {time_str_from_log}"
-                        else:
-                           session.first_successful_order_time = time_str_from_log
-                        break 
-                except Exception:
-                    pass # Keep default time if parsing fails
-    
     summary_text += f"✅ *زمان تقریبی پردازش/شروع ارسال:* {session.first_successful_order_time}\n"
 
-
+    # Updated order status messages
     if result["success"]:
-        session.add_log(f"سفارش مفید ارسال شد: {result.get('message', 'موفق')}", "success")
-        summary_text += f"\n{EMOJI['success']} *وضعیت کلی:* {result.get('message', 'سفارش با موفقیت پردازش شد.')}. \n {EMOJI['warning']} لطفا حتما به حساب کاربری خود در کارگزاری مراجعه کرده و از ثبت صحیح سفارش اطمینان حاصل کنید. {EMOJI['warning']}"
+        session.add_log(f"سفارش مفید با موفقیت پردازش شد: {result.get('message', 'موفق')}", "success")
+        summary_text += f"\n{EMOJI['success']} *وضعیت سفارش:* سفارشات بصورت کامل ارسال شدند."
     else:
         session.add_log(f"خطا در ارسال سفارش مفید: {result.get('message', 'ناموفق')}", "error")
-        session.update_activity() # Ensure timer is reset even on failure here
-        summary_text += f"\n{EMOJI['error']} *وضعیت کلی:* {result.get('message', 'خطا در پردازش سفارش.')}. \n {EMOJI['warning']} لطفا حتما به حساب کاربری خود در کارگزاری مراجعه کرده و از عدم ثبت  سفارش اطمینان حاصل کنید. {EMOJI['warning']}"
+        summary_text += f"\n{EMOJI['error']} *وضعیت سفارش:* خطا در ارسال سفارشات."
+        # Optionally include more details from result if available and safe to show
+        # error_detail = result.get('message', 'جزئیات بیشتر در لاگ‌های سرور موجود است.')
+        # summary_text += f" ({error_detail})"
 
-    # --- THIS IS THE CORRECTED PART ---
-    # Get the actual click count from the result of place_order
-    # Ensure mofid_module_DB.py's place_order returns 'click_count'
-    # and MofidBrokerSession's mofid_place_order wrapper passes it through.
-    actual_click_count = result.get("click_count", 0) # Default to 0 if not found
+
+    summary_text += f"\n\n{EMOJI['warning']} *توجه بسیار مهم:* لطفاً حتماً و فوراً به حساب کاربری خود در سامانه کارگزاری مفید مراجعه کرده و از ثبت صحیح، تعداد نهایی و وضعیت سفارش(های) خود اطمینان کامل حاصل کنید. مسئولیت نهایی سفارشات با شماست. {EMOJI['warning']}"
+
+    actual_click_count = result.get("click_count", 0)
     if actual_click_count > 0 :
-        summary_text += f"\n📜 *تعداد کل سفارشات ارسالی در 20 ثانیه:* {actual_click_count}"
-    else: # Fallback if click_count is not available for some reason, show log count
-        log_count = len(processed_submission_logs)
-        summary_text += f"\n📜 *تعداد لاگ‌های جزئیات ارسال:* {log_count}"
-    # --- END OF CORRECTION ---
+        summary_text += f"\n📜 *تعداد کل سفارشات ارسالی در بازه زمانی ارسال (کلیک‌های متوالی):* {actual_click_count}"
 
-
-    execution_details_list.append(summary_text) # Add the summary itself as the first "detail"
-    if processed_submission_logs:
-        execution_details_list.extend(processed_submission_logs)
-
-    session.order_details["execution_details"] = execution_details_list
+    # session.order_details["execution_details"] = [summary_text] # Storing summary if needed for other logic
 
     keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['details']} نمایش  جزئیات", callback_data="reshow_details")],
+        [InlineKeyboardButton(f"{EMOJI['details']} دریافت تاریخچه سفارشات (اکسل)", callback_data="reshow_details")],
         [InlineKeyboardButton(f"{EMOJI['new_order']} شروع سفارش جدید", callback_data="post_order_new_order_mofid")],
         [InlineKeyboardButton(f"{EMOJI['logout']} خروج از حساب کارگزاری", callback_data="post_order_logout_mofid")],
     ]
-    summary_msg = await context.bot.send_message(
+    
+    # Delete the "loading" message before sending the final summary.
+    if loading_message_id_to_delete:
+        try:
+            await context.bot.delete_message(chat_id=session.user_id, message_id=loading_message_id_to_delete)
+        except BadRequest as e:
+            logger.warning(f"Could not delete loading message (ID: {loading_message_id_to_delete}): {e}")
+
+    # Send the final summary as a new message. This ensures it's always sent.
+    await context.bot.send_message(
         chat_id=session.user_id,
-        text=f"{summary_text}\n\nبرای ادامه یکی از گزینه‌های زیر را انتخاب کنید:", # Send the summary text
+        text=f"{summary_text}\n\nبرای ادامه یکی از گزینه‌های زیر را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
-    session.order_detail_message_ids.append(summary_msg.message_id)
-
-    try:
-        await await_query_message.delete()
-    except BadRequest as e:
-        logger.warning(f"Could not delete loading message: {e}")
+    
+    # Automatic message cleanup is disabled.
+    # asyncio.create_task(schedule_order_detail_cleanup(context, session, session.user_id))
 
     return POST_ORDER_CHOICE
 async def confirm_no_cancel_order_completely(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2512,9 +2485,13 @@ async def _send_paginated_details(context: ContextTypes.DEFAULT_TYPE, session: M
         )
         session.order_detail_message_ids.append(msg.message_id)
         await asyncio.sleep(0.3)  # Delay to avoid rate limits
-
 async def handle_view_details(update: Update, context: ContextTypes.DEFAULT_TYPE, reshow: bool = False) -> int:
-    """Handle user choice for viewing details and show integrated post-order options."""
+    """
+    Handles user choice for viewing details.
+    The primary mechanism for "viewing details" is now the Excel file sent by `reshow_order_details`.
+    Paginated log display and automatic cleanup are removed.
+    This function mainly ensures the user is active and presents options.
+    """
     query = update.callback_query
     await query.answer()
 
@@ -2522,79 +2499,54 @@ async def handle_view_details(update: Update, context: ContextTypes.DEFAULT_TYPE
     session.update_activity()
     user_data = session.user_data
 
-    # Ensure user is still active
     if not user_data or not is_subscription_active(user_data):
         await query.edit_message_text(
             f"{EMOJI['error']} شما اجازه دسترسی به این بخش را ندارید. لطفا ابتدا ثبت‌نام کرده و یا اشتراک خود را تمدید کنید."
         )
         return await start(update, context)
 
-    # Clear previous detail messages if this is a "reshow_details"
+    # If the callback is "reshow_details", it's handled by the `reshow_order_details` function directly.
+    # This function, if reached through a different path or as a state fallback,
+    # will just ensure options are presented.
     if query.data == "reshow_details":
-        for msg_id in list(session.order_detail_message_ids):  # Iterate over a copy
-            try:
-                await context.bot.delete_message(chat_id=session.user_id, message_id=msg_id)
-            except BadRequest:  # Message might have been deleted already
-                pass
-            except Exception as e:
-                logger.error(f"Error deleting old detail message {msg_id}: {e}")
-        session.order_detail_message_ids = []
+        logger.info(f"handle_view_details called with reshow_details, deferring to reshow_order_details logic.")
+        return await reshow_order_details(update, context)
 
-    execution_details = session.order_details.get("execution_details", [])
-    summary_to_show_again = execution_details[0] if execution_details else "خلاصه‌ای برای نمایش وجود ندارد."
-
-    # Define post-order keyboard with all three buttons
+    # Present options if this state is reached.
     post_order_keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['details']} نمایش مجدد جزئیات", callback_data="reshow_details")],
+        [InlineKeyboardButton(f"{EMOJI['details']} دریافت تاریخچه سفارشات (اکسل)", callback_data="reshow_details")],
         [InlineKeyboardButton(f"{EMOJI['new_order']} شروع سفارش جدید", callback_data="post_order_new_order_mofid")],
         [InlineKeyboardButton(f"{EMOJI['logout']} خروج از حساب کارگزاری", callback_data="post_order_logout_mofid")],
     ]
+    
+    message_text_to_edit = query.message.text
+    # If the current message is not the final summary, provide a generic prompt.
+    # This check might need to be more robust depending on possible message texts.
+    if "خلاصه نهایی سفارش" not in message_text_to_edit :
+         message_text_to_edit = f"{EMOJI['info']} لطفاً گزینه بعدی خود را انتخاب کنید:"
 
-    # If reshowing details, send a new summary message
-    if reshow:
-        summary_msg = await context.bot.send_message(
-            chat_id=session.user_id,
-            text=f"{summary_to_show_again}\n\n{EMOJI['loading']} در حال ارسال مجدد جزئیات کامل...",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(post_order_keyboard)
+    try:
+        await query.edit_message_text(
+            text=message_text_to_edit,
+            reply_markup=InlineKeyboardMarkup(post_order_keyboard),
+            parse_mode="Markdown"
         )
-        session.order_detail_message_ids.append(summary_msg.message_id)
-        all_logs = execution_details[1:]  # Skip the summary part
-        logs_to_display = []
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logger.warning(f"Could not edit message in handle_view_details: {e}. Sending new options message.")
+            await context.bot.send_message(
+                chat_id=session.user_id,
+                text=f"{EMOJI['info']} لطفاً گزینه بعدی خود را انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup(post_order_keyboard)
+            )
 
-        if len(all_logs) < 50:  # If less than 50 logs, show all
-            logs_to_display = all_logs
-        else:  # 50 or more logs, show first 10 and last 10
-            logs_to_display.extend(all_logs[:10])
-            logs_to_display.append(f"\n...\n[پیام‌های میانی به دلیل طولانی بودن نمایش داده نمی‌شوند. تعداد کل لاگ‌ها: {len(all_logs)}]\n...\n")
-            logs_to_display.extend(all_logs[-10:])
-
-        if logs_to_display:
-            await _send_paginated_details(context, session, session.user_id, logs_to_display)
-
-        final_warning = f"""
-{EMOJI['alert']} *توجه مهم*
-لطفاً به حساب کاربری خود در کارگزاری مراجعه کنید و از ثبت صحیح سفارش و تعداد آن اطمینان حاصل نمایید. ممکن است به دلیل سرعت بالای ارسال، چندین سفارش در هسته معاملاتی ثبت شده باشد.
-"""
-        warning_msg = await context.bot.send_message(
-            chat_id=session.user_id,
-            text=final_warning,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(post_order_keyboard)
-        )
-        session.order_detail_message_ids.append(warning_msg.message_id)
-
-        # Schedule cleanup
-        asyncio.create_task(schedule_order_detail_cleanup(context, session, session.user_id))
-
+    logger.info("Paginated log display and automatic message cleanup are removed from handle_view_details.")
     return POST_ORDER_CHOICE
 
-# تابع _send_paginated_details دیگر لازم نیست و می‌توانید آن را حذف کنید یا کامنت بگذارید:
-# async def _send_paginated_details(context: ContextTypes.DEFAULT_TYPE, session: MofidBrokerSession, chat_id: int, logs: List[str]):
-#    pass
+
 
 async def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the 'نمایش مجدد جزئیات' button by fetching and sending the order history Excel."""
+    """Handles the 'دریافت تاریخچه سفارشات (اکسل)' button by fetching and sending the order history Excel."""
     query = update.callback_query
     await query.answer()
 
@@ -2603,36 +2555,39 @@ async def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
     user_data = session.user_data
 
     if not user_data or not is_subscription_active(user_data):
-        await query.edit_message_text(
-            f"{EMOJI['error']} شما اجازه دسترسی به این بخش را ندارید. "
+        await context.bot.send_message(
+            chat_id=session.user_id,
+            text=f"{EMOJI['error']} شما اجازه دسترسی به این بخش را ندارید. "
             f"لطفا ابتدا ثبت‌نام کرده و یا اشتراک خود را تمدید کنید."
         )
+        try: # Attempt to edit the original message as well, if possible
+            await query.edit_message_text(
+                f"{EMOJI['error']} شما اجازه دسترسی به این بخش را ندارید. "
+                f"لطفا ابتدا ثبت‌نام کرده و یا اشتراک خود را تمدید کنید."
+            )
+        except BadRequest: pass # If edit fails, new message is already sent
         return await start(update, context)
 
     if not session.is_logged_in:
-        await query.edit_message_text(
-            f"{EMOJI['error']} شما وارد حساب کارگزاری مفید نشده‌اید. لطفاً ابتدا با دستور /start وارد شوید."
+        await context.bot.send_message(
+            chat_id=session.user_id,
+            text=f"{EMOJI['error']} شما وارد حساب کارگزاری مفید نشده‌اید. لطفاً ابتدا با دستور /start وارد شوید."
         )
-        return await start(update, context) # بازگشت به منوی اصلی برای ورود
+        try: # Attempt to edit the original message
+            await query.edit_message_text(
+                f"{EMOJI['error']} شما وارد حساب کارگزاری مفید نشده‌اید. لطفاً ابتدا با دستور /start وارد شوید."
+            )
+        except BadRequest: pass
+        return await start(update, context)
 
-    # پاک کردن پیام‌های جزئیات قبلی (اگر وجود داشته باشد)
-    for msg_id in list(session.order_detail_message_ids):
-        try:
-            await context.bot.delete_message(chat_id=session.user_id, message_id=msg_id)
-        except BadRequest: # پیام ممکن است قبلا حذف شده باشد
-            pass
-        except Exception as e:
-            logger.error(f"Error deleting old detail message {msg_id} in reshow_order_details: {e}")
-    session.order_detail_message_ids = []
+    # Message cleanup is disabled, so no need to clear session.order_detail_message_ids here.
 
     stock_name = session.order_details.get("stock")
-    # 'action' باید 'خرید' یا 'فروش' باشد همانطور که در session.order_details ذخیره شده
-    order_action_persian = session.order_details.get("action") 
+    order_action_persian = session.order_details.get("action")
 
     if not stock_name or not order_action_persian:
         err_msg_no_details = f"{EMOJI['error']} اطلاعات سفارش (نماد یا نوع معامله) برای دریافت تاریخچه یافت نشد."
-        msg = await context.bot.send_message(chat_id=session.user_id, text=err_msg_no_details)
-        session.order_detail_message_ids.append(msg.message_id)
+        await context.bot.send_message(chat_id=session.user_id, text=err_msg_no_details)
         session.add_log(err_msg_no_details, "error")
         
         post_order_keyboard_err = [
@@ -2641,38 +2596,47 @@ async def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
         ]
         await context.bot.send_message(
             chat_id=session.user_id,
-            text="لطفا یک گزینه را انتخاب کنید:", 
+            text="لطفا یک گزینه را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(post_order_keyboard_err)
         )
         return POST_ORDER_CHOICE
 
     loading_msg_text = f"{EMOJI['loading']} در حال آماده‌سازی و دریافت تاریخچه سفارشات برای نماد **'{stock_name}'** ({order_action_persian}) از کارگزاری مفید...\nاین عملیات ممکن است چند لحظه طول بکشد."
+    
+    # Send loading message as a new message to avoid issues with editing old/complex messages
     status_msg = await context.bot.send_message(chat_id=session.user_id, text=loading_msg_text, parse_mode="Markdown")
-    session.order_detail_message_ids.append(status_msg.message_id)
-
+    
     downloaded_excel_path = None
     try:
         loop = asyncio.get_event_loop()
-        # اجرای متد همزمان get_order_history_excel در یک ترد جداگانه
         downloaded_excel_path = await loop.run_in_executor(
-            None,  # استفاده از thread pool پیش‌فرض
-            session.bot.get_order_history_excel, # متد مورد نظر برای اجرا
-            stock_name,                         # آرگومان اول متد
-            order_action_persian                # آرگومان دوم متد
+            None,
+            session.bot.get_order_history_excel,
+            stock_name,
+            order_action_persian
         )
 
         if downloaded_excel_path and os.path.exists(downloaded_excel_path):
             session.add_log(f"فایل تاریخچه سفارشات '{os.path.basename(downloaded_excel_path)}' با موفقیت در سرور دریافت شد.", "success")
             file_name_for_user = f"Mofid_OrderHistory_{stock_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            
+            # Updated caption for the Excel file
+            excel_caption = (
+                f"{EMOJI['details']} فایل تاریخچه سفارشات کارگزاری مفید برای نماد **{stock_name}** (عملیات: {order_action_persian}).\n"
+                f"این فایل، تاریخچه سفارشات شما را از سامانه کارگزاری نمایش می‌دهد و حاوی جزئیات ۱۰ تلاش آخر برای ارسال سفارشات پیاپی برای نماد مربوطه می‌باشد. "
+                f"لطفاً محتوای آن را برای اطمینان از صحت و کامل بودن اطلاعات بررسی نمایید."
+            )
+
             try:
                 with open(downloaded_excel_path, 'rb') as excel_file:
                     await context.bot.send_document(
                         chat_id=session.user_id,
                         document=InputFile(excel_file, filename=file_name_for_user),
-                        caption=f"{EMOJI['details']} فایل تاریخچه سفارشات برای نماد **{stock_name}** (عملیات: {order_action_persian}).",
+                        caption=excel_caption,
                         parse_mode="Markdown"
                     )
                 session.add_log(f"فایل اکسل تاریخچه سفارشات ({file_name_for_user}) با موفقیت برای کاربر ارسال شد.", "success")
+                # Edit the status_msg (loading message) to success
                 await context.bot.edit_message_text(
                     chat_id=session.user_id,
                     message_id=status_msg.message_id,
@@ -2695,7 +2659,6 @@ async def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
                     logger.error(f"Error deleting temporary Excel file {downloaded_excel_path}: {e}")
                     session.add_log(f"خطا در حذف فایل اکسل موقت از سرور: {e}", "error")
         else:
-            # این پیام در صورتی نمایش داده می‌شود که get_order_history_excel مقدار None برگرداند (یعنی دانلود ناموفق بود)
             msg_fail = f"{EMOJI['error']} دریافت گزارش تاریخچه سفارشات برای نماد '{stock_name}' ناموفق بود. لطفاً مطمئن شوید نماد و نوع سفارش صحیح است و مجدداً تلاش کنید یا لاگ‌های سرور را بررسی نمایید."
             await context.bot.edit_message_text(chat_id=session.user_id, message_id=status_msg.message_id, text=msg_fail)
             session.add_log(msg_fail, "error")
@@ -2705,44 +2668,39 @@ async def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
         detailed_error_msg = f"{EMOJI['error']} یک خطای پیش‌بینی نشده در هنگام پردازش درخواست تاریخچه سفارشات رخ داد. لطفاً دقایقی دیگر مجددا تلاش کنید."
         try:
             await context.bot.edit_message_text(chat_id=session.user_id, message_id=status_msg.message_id, text=detailed_error_msg)
-        except BadRequest: 
-            new_err_msg = await context.bot.send_message(chat_id=session.user_id, text=detailed_error_msg)
-            session.order_detail_message_ids.append(new_err_msg.message_id)
+        except BadRequest: # If editing status_msg fails, send a new error message
+            await context.bot.send_message(chat_id=session.user_id, text=detailed_error_msg)
         session.add_log(f"خطای بحرانی و غیرمنتظره در reshow_order_details: {str(e)}", "critical")
 
-    # کیبورد گزینه‌های پس از سفارش/نمایش جزئیات
+    # Send the final warning message
+    final_warning = f"""
+{EMOJI['alert']} *توجه بسیار مهم*
+لطفاً به حساب کاربری خود در کارگزاری مراجعه کنید و از ثبت صحیح سفارش و تعداد آن اطمینان حاصل نمایید. ممکن است به دلیل سرعت بالای ارسال، چندین سفارش در هسته معاملاتی ثبت شده باشد. مسئولیت نهایی سفارشات با شماست.
+"""
+    await context.bot.send_message(
+        chat_id=session.user_id,
+        text=final_warning,
+        parse_mode="Markdown"
+    )
+
     post_order_keyboard = [
         [InlineKeyboardButton(f"{EMOJI['details']} دریافت مجدد تاریخچه (اکسل)", callback_data="reshow_details")],
         [InlineKeyboardButton(f"{EMOJI['new_order']} شروع سفارش جدید", callback_data="post_order_new_order_mofid")],
         [InlineKeyboardButton(f"{EMOJI['logout']} خروج از حساب کارگزاری", callback_data="post_order_logout_mofid")],
     ]
     
-    # ارسال پیام گزینه‌ها پس از اتمام عملیات (چه موفق چه ناموفق)
-    # اگر پیام status_msg به پیام خطا تبدیل شده، آن را نگه می‌داریم و پیام جدیدی برای گزینه‌ها ارسال می‌کنیم.
-    # در غیر این صورت (اگر status_msg پیام موفقیت بود یا حذف شدنی است)، می‌توان آن را ویرایش کرد یا پیام جدید فرستاد.
-    # برای سادگی، یک پیام جدید برای گزینه‌ها ارسال می‌کنیم.
-    
-    # اگر status_msg یک پیام موفقیت بود، می‌توان آن را حذف کرد قبل از ارسال گزینه‌های نهایی
-    # if status_msg and status_msg.text.startswith(EMOJI['success']): # یا هر شرط دیگری برای شناسایی پیام موفقیت
-    # try:
-    # await context.bot.delete_message(chat_id=session.user_id, message_id=status_msg.message_id)
-    # if status_msg.message_id in session.order_detail_message_ids:
-    # session.order_detail_message_ids.remove(status_msg.message_id)
-    # except BadRequest:
-    # pass # اشکالی ندارد اگر قبلا حذف شده باشد
-
-    final_options_msg = await context.bot.send_message(
+    # Send a new message for options, ensuring it's always visible after the process.
+    await context.bot.send_message(
         chat_id=session.user_id,
         text=f"{EMOJI['info']} لطفاً گزینه بعدی خود را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(post_order_keyboard)
     )
-    session.order_detail_message_ids.append(final_options_msg.message_id)
     
-    # زمانبندی پاکسازی پیام‌های ایجاد شده (به جز فایل اکسل که ارسال شده)
-    # این تابع پیام‌های موجود در session.order_detail_message_ids را مدیریت می‌کند
-    asyncio.create_task(schedule_order_detail_cleanup(context, session, session.user_id))
+    # Automatic message cleanup is disabled.
+    # asyncio.create_task(schedule_order_detail_cleanup(context, session, session.user_id))
 
     return POST_ORDER_CHOICE
+�
 
 async def handle_post_order_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
