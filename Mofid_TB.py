@@ -2589,7 +2589,11 @@ async def handle_view_details(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     return POST_ORDER_CHOICE
 
-sync def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+# تابع _send_paginated_details دیگر لازم نیست و می‌توانید آن را حذف کنید یا کامنت بگذارید:
+# async def _send_paginated_details(context: ContextTypes.DEFAULT_TYPE, session: MofidBrokerSession, chat_id: int, logs: List[str]):
+#    pass
+
+async def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the 'نمایش مجدد جزئیات' button by fetching and sending the order history Excel."""
     query = update.callback_query
     await query.answer()
@@ -2642,7 +2646,7 @@ sync def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return POST_ORDER_CHOICE
 
-    loading_msg_text = f"{EMOJI['loading']} در حال آماده‌سازی تاریخچه سفارشات برای نماد *'{stock_name}'* ({order_action_persian}) از کارگزاری مفید...\nاین عملیات ممکن است چند لحظه طول بکشد."
+    loading_msg_text = f"{EMOJI['loading']} در حال آماده‌سازی و دریافت تاریخچه سفارشات برای نماد **'{stock_name}'** ({order_action_persian}) از کارگزاری مفید...\nاین عملیات ممکن است چند لحظه طول بکشد."
     status_msg = await context.bot.send_message(chat_id=session.user_id, text=loading_msg_text, parse_mode="Markdown")
     session.order_detail_message_ids.append(status_msg.message_id)
 
@@ -2692,7 +2696,7 @@ sync def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE
                     session.add_log(f"خطا در حذف فایل اکسل موقت از سرور: {e}", "error")
         else:
             # این پیام در صورتی نمایش داده می‌شود که get_order_history_excel مقدار None برگرداند (یعنی دانلود ناموفق بود)
-            msg_fail = f"{EMOJI['error']} دریافت گزارش تاریخچه سفارشات برای نماد '{stock_name}'ناموفق بود ."
+            msg_fail = f"{EMOJI['error']} دریافت گزارش تاریخچه سفارشات برای نماد '{stock_name}' ناموفق بود. لطفاً مطمئن شوید نماد و نوع سفارش صحیح است و مجدداً تلاش کنید یا لاگ‌های سرور را بررسی نمایید."
             await context.bot.edit_message_text(chat_id=session.user_id, message_id=status_msg.message_id, text=msg_fail)
             session.add_log(msg_fail, "error")
 
@@ -2708,12 +2712,24 @@ sync def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # کیبورد گزینه‌های پس از سفارش/نمایش جزئیات
     post_order_keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['details']} دریافت مجدد جزئیات 10 سفارش اخر ", callback_data="reshow_details")],
+        [InlineKeyboardButton(f"{EMOJI['details']} دریافت مجدد تاریخچه (اکسل)", callback_data="reshow_details")],
         [InlineKeyboardButton(f"{EMOJI['new_order']} شروع سفارش جدید", callback_data="post_order_new_order_mofid")],
         [InlineKeyboardButton(f"{EMOJI['logout']} خروج از حساب کارگزاری", callback_data="post_order_logout_mofid")],
     ]
     
+    # ارسال پیام گزینه‌ها پس از اتمام عملیات (چه موفق چه ناموفق)
+    # اگر پیام status_msg به پیام خطا تبدیل شده، آن را نگه می‌داریم و پیام جدیدی برای گزینه‌ها ارسال می‌کنیم.
+    # در غیر این صورت (اگر status_msg پیام موفقیت بود یا حذف شدنی است)، می‌توان آن را ویرایش کرد یا پیام جدید فرستاد.
+    # برای سادگی، یک پیام جدید برای گزینه‌ها ارسال می‌کنیم.
     
+    # اگر status_msg یک پیام موفقیت بود، می‌توان آن را حذف کرد قبل از ارسال گزینه‌های نهایی
+    # if status_msg and status_msg.text.startswith(EMOJI['success']): # یا هر شرط دیگری برای شناسایی پیام موفقیت
+    # try:
+    # await context.bot.delete_message(chat_id=session.user_id, message_id=status_msg.message_id)
+    # if status_msg.message_id in session.order_detail_message_ids:
+    # session.order_detail_message_ids.remove(status_msg.message_id)
+    # except BadRequest:
+    # pass # اشکالی ندارد اگر قبلا حذف شده باشد
 
     final_options_msg = await context.bot.send_message(
         chat_id=session.user_id,
@@ -2722,7 +2738,9 @@ sync def reshow_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     session.order_detail_message_ids.append(final_options_msg.message_id)
     
-    #asyncio.create_task(schedule_order_detail_cleanup(context, session, session.user_id))
+    # زمانبندی پاکسازی پیام‌های ایجاد شده (به جز فایل اکسل که ارسال شده)
+    # این تابع پیام‌های موجود در session.order_detail_message_ids را مدیریت می‌کند
+    asyncio.create_task(schedule_order_detail_cleanup(context, session, session.user_id))
 
     return POST_ORDER_CHOICE
 

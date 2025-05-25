@@ -1,0 +1,8 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = true
+[remote "origin"]
+	url = https://github.com/aminmoghadasi75/Mofid_Trader_BOT.git
+	fetch = +refs/*:refs/*
+	mirror = true
