@@ -268,7 +268,7 @@ class MofidBroker:
                 logger.error(f"Could not save screenshot on Exception: {ex_ss}")
             return None
 
-     def click_watchlist_tab(self):
+    def click_watchlist_tab(self):
         """
         Clicks on the 'Watchlist' (دیده‌بان) tab to ensure the UI is in the correct state
         for new stock selection, especially after viewing order history.
