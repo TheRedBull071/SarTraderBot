@@ -93,15 +93,19 @@ class MofidBroker:
             return False
 
 
-    def get_order_history_excel(self, stock_name, order_action_persian, download_timeout=45):
+    def get_order_history_excel(self, stock_name, order_action_persian, order_status_filter_value="1: 1", download_timeout=45): # مقدار پیش‌فرض برای "همه"
         if not self.driver:
             logger.error("Driver not initialized for get_order_history_excel.")
             self.add_log("خطا: درایور برای دریافت تاریخچه سفارشات مقداردهی نشده است.", "error")
             return None
         
         try:
-            logger.info(f"Starting order history Excel retrieval for stock: {stock_name}, action: {order_action_persian} (date filter removed)")
-            self.add_log(f"شروع دریافت تاریخچه سفارشات (اکسل) برای نماد: {stock_name}, نوع: {order_action_persian} (بدون فیلتر تاریخ)", "info")
+            status_description = "همه وضعیت‌ها"
+            if order_status_filter_value == "0: 0":
+                status_description = "بدون خطا"
+            
+            logger.info(f"Starting order history Excel retrieval for stock: {stock_name}, action: {order_action_persian}, status_filter: {status_description}")
+            self.add_log(f"شروع دریافت تاریخچه سفارشات (اکسل) برای نماد: {stock_name}, نوع: {order_action_persian}, وضعیت: {status_description}", "info")
 
             # Step 1: Click "Order History" icon
             logger.info("Clicking Order History icon...")
@@ -135,18 +139,24 @@ class MofidBroker:
             order_side_select_elem = self.wait_for_element(By.ID, "orderSide", timeout=5)
             order_side_select = Select(order_side_select_elem)
             if order_action_persian == "خرید":
-                order_side_select.select_by_value("1: 0")
+                order_side_select.select_by_value("1: 0") # Buy
             elif order_action_persian == "فروش":
-                order_side_select.select_by_value("2: 1")
+                order_side_select.select_by_value("2: 1") # Sell
             self.add_log(f"سمت سفارش '{order_action_persian}' انتخاب شد", "info")
             time.sleep(0.5)
 
-            # Step 5: Select status "همه"
-            logger.info("Selecting status 'همه'...")
+            # Step 5: Select status based on order_status_filter_value
+            logger.info(f"Selecting status with filter value: '{order_status_filter_value}' ({status_description})...")
             status_select_elem = self.wait_for_element(By.ID, "states", timeout=5)
             status_select = Select(status_select_elem)
-            status_select.select_by_value("1: 1") 
-            self.add_log("وضعیت سفارشات 'همه' انتخاب شد", "info")
+            try:
+                status_select.select_by_value(order_status_filter_value)
+                self.add_log(f"وضعیت سفارشات '{status_description}' (value: {order_status_filter_value}) انتخاب شد", "info")
+            except Exception as e_status_select:
+                logger.error(f"Could not select status with value '{order_status_filter_value}'. Defaulting to 'همه'. Error: {e_status_select}")
+                self.add_log(f"خطا در انتخاب وضعیت '{status_description}'. انتخاب پیش‌فرض 'همه'. خطا: {e_status_select}", "warning")
+                status_select.select_by_value("1: 1") # Fallback to "همه"
+                self.add_log("وضعیت سفارشات 'همه' (پیش‌فرض پس از خطا) انتخاب شد", "info")
             time.sleep(0.5)
 
             # Step 6: Date selection is REMOVED as per user request
@@ -257,6 +267,63 @@ class MofidBroker:
             except Exception as ex_ss:
                 logger.error(f"Could not save screenshot on Exception: {ex_ss}")
             return None
+
+     def click_watchlist_tab(self):
+        """
+        Clicks on the 'Watchlist' (دیده‌بان) tab to ensure the UI is in the correct state
+        for new stock selection, especially after viewing order history.
+        """
+        if not self.driver:
+            logger.error("Driver not initialized for click_watchlist_tab.")
+            self.add_log("خطا: درایور برای کلیک روی تب دیده‌بان مقداردهی نشده است.", "error")
+            return False
+        
+        try:
+            logger.info("Attempting to click the 'Watchlist' (دیده‌بان) tab.")
+            self.add_log("در تلاش برای کلیک روی تب 'دیده‌بان'...", "info")
+
+            # Selector based on the provided HTML: li[data-cy="mw-menu-icon"]
+            # This is the main tab for watchlist/market view.
+            watchlist_tab_selector = "li[data-cy='mw-menu-icon']"
+            
+            watchlist_tab_element = self.wait_for_element(By.CSS_SELECTOR, watchlist_tab_selector, timeout=10)
+            
+            # Check if the tab is already active to potentially avoid an unnecessary click,
+            # though clicking an active tab usually just reloads or does nothing harmful.
+            is_active = "menu_item--active" in watchlist_tab_element.get_attribute("class")
+            if is_active:
+                logger.info("Watchlist tab is already active.")
+                self.add_log("تب 'دیده‌بان' هم اکنون فعال است.", "info")
+                # Even if active, a click might be needed if a sub-panel (like order history) is overlaying it.
+                # So, we proceed with the click.
+            
+            # Using JavaScript click can be more reliable for elements that might be
+            # partially obscured or have complex event listeners.
+            self.driver.execute_script("arguments[0].click();", watchlist_tab_element)
+            logger.info("Clicked on the 'Watchlist' (دیده‌بان) tab successfully.")
+            self.add_log("کلیک روی تب 'دیده‌بان' با موفقیت انجام شد.", "success")
+            
+            # Add a small delay to allow the UI to update if necessary
+            time.sleep(0.5) # Adjust as needed, but keep it short
+            return True
+
+        except TimeoutException:
+            logger.error("TimeoutException: 'Watchlist' (دیده‌بان) tab not found or not clickable.")
+            self.add_log("خطای وقفه زمانی: تب 'دیده‌بان' پیدا نشد یا قابل کلیک نبود.", "error")
+            try:
+                # Attempt to take a screenshot for debugging
+                self.driver.save_screenshot(f"watchlist_click_timeout_{int(time.time())}.png")
+            except Exception as ss_err:
+                logger.error(f"Could not save screenshot on watchlist click timeout: {ss_err}")
+            return False
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while clicking 'Watchlist' (دیده‌بان) tab: {e}", exc_info=True)
+            self.add_log(f"خطای غیرمنتظره هنگام کلیک روی تب 'دیده‌بان': {str(e)}", "error")
+            try:
+                self.driver.save_screenshot(f"watchlist_click_error_{int(time.time())}.png")
+            except Exception as ss_err:
+                logger.error(f"Could not save screenshot on watchlist click error: {ss_err}")
+            return False
 
 
     def wait_for_element(self, by, value, timeout=10, retries=5):
